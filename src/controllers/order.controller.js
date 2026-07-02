@@ -2,6 +2,7 @@ import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { resolveShippingPartnerId } from "../utils/partner-scope.js";
+import { normalizePartnerId } from "../utils/partner-id.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -295,7 +296,10 @@ export async function createCheckout(req, res) {
     const user = getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
 
     const {
       payment_method = "cod",
@@ -322,7 +326,10 @@ export async function createCheckout(req, res) {
       return error(res, "Payment screenshot is required for wire transfer", 400);
     }
 
-    const shippingPartnerId = await resolveShippingPartnerId(user, address_id);
+    const shippingPartnerId = await resolveShippingPartnerId(
+      { partner_id: partnerId },
+      address_id,
+    );
 
     if (!shippingPartnerId) {
       return error(
@@ -370,7 +377,7 @@ export async function createCheckout(req, res) {
       const coupons = await odooCall("x_membership_coupon_ti", "search_read", {
         domain: [
           ["x_studio_coupon_code", "=", coupon_code],
-          ["x_studio_customer", "=", user.partner_id],
+          ["x_studio_customer", "=", partnerId],
         ],
         fields: [
           "id",
@@ -403,8 +410,8 @@ export async function createCheckout(req, res) {
     }
 
     const orderVals = {
-      partner_id: user.partner_id,
-      partner_invoice_id: user.partner_id,
+      partner_id: partnerId,
+      partner_invoice_id: partnerId,
       partner_shipping_id: shippingPartnerId,
 
       x_studio_preferred_delivery_date: preferred_delivery_date || false,
@@ -529,11 +536,14 @@ export async function getOrders(req, res) {
     const user = getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
 
     const orders = await attachShippingAddresses(
       await odooCall("sale.order", "search_read", {
-        domain: [["partner_id", "=", user.partner_id]],
+        domain: [["partner_id", "=", partnerId]],
         fields: [
           "id",
           "name",
@@ -565,11 +575,15 @@ export async function getOrderById(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!orderId) return error(res, "Invalid order ID", 400);
 
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
+
     const orders = await attachShippingAddresses(
       await odooCall("sale.order", "search_read", {
         domain: [
           ["id", "=", orderId],
-          ["partner_id", "=", user.partner_id],
+          ["partner_id", "=", partnerId],
         ],
         fields: [
           "id",
@@ -619,10 +633,14 @@ export async function reorder(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!oldOrderId) return error(res, "Invalid order ID", 400);
 
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
+
     const oldOrders = await odooCall("sale.order", "search_read", {
       domain: [
         ["id", "=", oldOrderId],
-        ["partner_id", "=", user.partner_id],
+        ["partner_id", "=", partnerId],
       ],
       fields: [
         "id",
@@ -657,10 +675,10 @@ export async function reorder(req, res) {
     const createdIds = await odooCall("sale.order", "create", {
       vals_list: [
         {
-          partner_id: user.partner_id,
-          partner_invoice_id: user.partner_id,
+          partner_id: partnerId,
+          partner_invoice_id: partnerId,
           partner_shipping_id:
-            oldOrders[0].partner_shipping_id?.[0] || user.partner_id,
+            oldOrders[0].partner_shipping_id?.[0] || partnerId,
 
           x_studio_preferred_delivery_date:
             oldOrders[0].x_studio_preferred_delivery_date || false,

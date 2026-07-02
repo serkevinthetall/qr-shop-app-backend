@@ -2,6 +2,7 @@ import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { normalizePhone, getPhoneSearchTail, phonesMatch } from "../utils/phone.js";
+import { normalizePartnerId } from "../utils/partner-id.js";
 import {
   getAccountAddresses,
   isManagedChildAddress,
@@ -123,9 +124,11 @@ export async function getAddresses(req, res) {
     const user = getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+    const partnerId = normalizePartnerId(user.partner_id);
 
-    const addresses = await getAccountAddresses(user.partner_id);
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
+
+    const addresses = await getAccountAddresses(partnerId);
 
     return success(res, { addresses });
   } catch (err) {
@@ -138,7 +141,10 @@ export async function createAddress(req, res) {
     const user = getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
 
     const {
       name,
@@ -180,7 +186,7 @@ export async function createAddress(req, res) {
     const createdIds = await odooCall("res.partner", "create", {
       vals_list: [
         {
-          parent_id: user.partner_id,
+          parent_id: partnerId,
           type: "delivery",
           name: String(name).trim(),
           phone: normalizedPhone,
@@ -211,10 +217,13 @@ export async function updateAddress(req, res) {
     const addressId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
     if (!addressId) return error(res, "Invalid address ID", 400);
 
-    const isEditable = await isManagedChildAddress(addressId, user.partner_id);
+    const isEditable = await isManagedChildAddress(addressId, partnerId);
 
     if (!isEditable) return error(res, "Address not found", 404);
 
@@ -269,10 +278,13 @@ export async function deleteAddress(req, res) {
     const addressId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
-    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const partnerId = normalizePartnerId(user.partner_id);
+
+    if (!partnerId) return error(res, "No partner linked to this user", 400);
     if (!addressId) return error(res, "Invalid address ID", 400);
 
-    const isEditable = await isManagedChildAddress(addressId, user.partner_id);
+    const isEditable = await isManagedChildAddress(addressId, partnerId);
 
     if (!isEditable) return error(res, "Address not found", 404);
 

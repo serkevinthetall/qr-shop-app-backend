@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { normalizePartnerId } from "../utils/partner-id.js";
 import { normalizePhone } from "../utils/phone.js";
 import { odooCall, odooAuthenticate } from "../services/odoo.service.js";
 import { createToken } from "../services/token.service.js";
@@ -44,10 +45,15 @@ export async function login(req, res) {
       return error(res, "Wrong login or password", 401);
     }
 
+    const partnerId =
+      normalizePartnerId(user.partner_id) ??
+      normalizePartnerId(partner?.id) ??
+      null;
+
     const token = createToken({
       uid: user.uid,
       login: odooLogin,
-      partner_id: user.partner_id || partner?.id || null,
+      partner_id: partnerId,
     });
 
     return success(res, {
@@ -57,7 +63,7 @@ export async function login(req, res) {
         id: user.uid,
         name: user.name,
         login: odooLogin,
-        partner_id: user.partner_id || partner?.id || null,
+        partner_id: partnerId,
       },
     });
   } catch (err) {

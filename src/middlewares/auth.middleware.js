@@ -1,4 +1,5 @@
 import { verifyToken } from "../services/token.service.js";
+import { normalizePartnerId } from "../utils/partner-id.js";
 
 export function getAuthUser(req) {
   const authHeader = req.headers.authorization || "";
@@ -13,7 +14,16 @@ export function getAuthUser(req) {
     return null;
   }
 
-  return verifyToken(token);
+  const user = verifyToken(token);
+
+  if (!user) {
+    return null;
+  }
+
+  return {
+    ...user,
+    partner_id: normalizePartnerId(user.partner_id),
+  };
 }
 
 export function requireAuth(req, res, next) {

@@ -1,12 +1,47 @@
 import { odooCall } from "../services/odoo.service.js";
+import { normalizePartnerId } from "./partner-id.js";
+
+const ADDRESS_FIELDS = [
+  "id",
+  "name",
+  "phone",
+  "street",
+  "street2",
+  "city",
+  "zip",
+  "state_id",
+  "country_id",
+  "parent_id",
+];
+
+function sortAddresses(addresses) {
+  return [...addresses].sort((left, right) => {
+    const leftParent = Array.isArray(left.parent_id) ? left.parent_id[0] : 0;
+    const rightParent = Array.isArray(right.parent_id) ? right.parent_id[0] : 0;
+
+    if (leftParent !== rightParent) {
+      return leftParent - rightParent;
+    }
+
+    return left.id - right.id;
+  });
+}
 
 export async function getAccountPartnerIds(partnerId) {
-  const partners = await odooCall("res.partner", "read", {
-    args: [[partnerId], ["parent_id", "commercial_partner_id"]],
+  const id = normalizePartnerId(partnerId);
+
+  if (!id) {
+    return [];
+  }
+
+  const partners = await odooCall("res.partner", "search_read", {
+    domain: [["id", "=", id]],
+    fields: ["parent_id", "commercial_partner_id"],
+    limit: 1,
   });
 
   const partner = partners[0];
-  const ids = new Set([partnerId]);
+  const ids = new Set([id]);
 
   if (partner?.parent_id?.[0]) {
     ids.add(partner.parent_id[0]);
@@ -19,20 +54,62 @@ export async function getAccountPartnerIds(partnerId) {
   return [...ids];
 }
 
-export async function resolveShippingPartnerId(user, rawAddressId) {
-  let requestedId = rawAddressId;
+async function searchPartnerAddresses(domain) {
+  const addresses = await odooCall("res.partner", "search_read", {
+    domain: [["active", "=", true], ...domain],
+    fields: ADDRESS_FIELDS,
+    limit: 100,
+  });
 
-  if (Array.isArray(requestedId)) {
-    requestedId = requestedId[0];
+  return sortAddresses(addresses);
+}
+
+async function searchSimplePartnerAddresses(partnerId) {
+  return searchPartnerAddresses([
+    "|",
+    ["id", "=", partnerId],
+    ["parent_id", "=", partnerId],
+  ]);
+}
+
+async function searchExpandedPartnerAddresses(partnerId) {
+  const accountPartnerIds = await getAccountPartnerIds(partnerId);
+
+  if (!accountPartnerIds.length) {
+    return [];
   }
 
-  requestedId = Number(requestedId);
+  return searchPartnerAddresses([
+    "|",
+    ["id", "in", accountPartnerIds],
+    ["parent_id", "in", accountPartnerIds],
+  ]);
+}
 
-  if (!Number.isFinite(requestedId) || requestedId <= 0) {
+export async function getAccountAddresses(partnerId) {
+  const id = normalizePartnerId(partnerId);
+
+  if (!id) {
+    return [];
+  }
+
+  try {
+    return await searchExpandedPartnerAddresses(id);
+  } catch (err) {
+    console.log("Expanded address lookup failed, falling back:", err.message);
+    return searchSimplePartnerAddresses(id);
+  }
+}
+
+export async function resolveShippingPartnerId(user, rawAddressId) {
+  const partnerId = normalizePartnerId(user?.partner_id);
+  const requestedId = normalizePartnerId(rawAddressId);
+
+  if (!partnerId || !requestedId) {
     return null;
   }
 
-  const accountPartnerIds = await getAccountPartnerIds(user.partner_id);
+  const accountPartnerIds = await getAccountPartnerIds(partnerId);
 
   if (accountPartnerIds.includes(requestedId)) {
     return requestedId;
@@ -42,6 +119,7 @@ export async function resolveShippingPartnerId(user, rawAddressId) {
     domain: [
       ["id", "=", requestedId],
       ["parent_id", "in", accountPartnerIds],
+      ["active", "=", true],
     ],
     fields: ["id"],
     limit: 1,
@@ -54,41 +132,21 @@ export async function resolveShippingPartnerId(user, rawAddressId) {
   return requestedId;
 }
 
-export async function getAccountAddresses(partnerId) {
-  const accountPartnerIds = await getAccountPartnerIds(partnerId);
-
-  return odooCall("res.partner", "search_read", {
-    domain: [
-      "|",
-      ["id", "in", accountPartnerIds],
-      ["parent_id", "in", accountPartnerIds],
-    ],
-    fields: [
-      "id",
-      "name",
-      "phone",
-      "mobile",
-      "street",
-      "street2",
-      "city",
-      "zip",
-      "state_id",
-      "country_id",
-      "type",
-      "parent_id",
-    ],
-    order: "parent_id asc, id asc",
-    limit: 100,
-  });
-}
-
 export async function isManagedChildAddress(addressId, partnerId) {
-  const accountPartnerIds = await getAccountPartnerIds(partnerId);
+  const normalizedAddressId = normalizePartnerId(addressId);
+  const normalizedPartnerId = normalizePartnerId(partnerId);
+
+  if (!normalizedAddressId || !normalizedPartnerId) {
+    return false;
+  }
+
+  const accountPartnerIds = await getAccountPartnerIds(normalizedPartnerId);
 
   const addresses = await odooCall("res.partner", "search_read", {
     domain: [
-      ["id", "=", addressId],
+      ["id", "=", normalizedAddressId],
       ["parent_id", "in", accountPartnerIds],
+      ["active", "=", true],
     ],
     fields: ["id"],
     limit: 1,
