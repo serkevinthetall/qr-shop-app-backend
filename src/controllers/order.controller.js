@@ -1,6 +1,7 @@
 import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
+import { resolveShippingPartnerId } from "../utils/partner-scope.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -55,32 +56,146 @@ function parseScalarId(value) {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-async function resolveShippingPartnerId(user, rawAddressId) {
-  const requestedId = parseScalarId(rawAddressId);
+function formatPartnerAddress(partner) {
+  if (!partner) {
+    return "";
+  }
 
-  if (!requestedId) {
+  const lines = [
+    partner.name,
+    partner.phone || partner.mobile,
+    partner.street,
+    partner.street2,
+    [partner.city, partner.zip].filter(Boolean).join(" "),
+    Array.isArray(partner.state_id) ? partner.state_id[1] : "",
+    Array.isArray(partner.country_id) ? partner.country_id[1] : "",
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+function mapShippingAddress(partner) {
+  if (!partner) {
     return null;
   }
 
-  if (requestedId === user.partner_id) {
-    return user.partner_id;
+  return {
+    id: partner.id,
+    name: partner.name || "",
+    phone: partner.phone || partner.mobile || "",
+    street: partner.street || "",
+    street2: partner.street2 || "",
+    city: partner.city || "",
+    zip: partner.zip || "",
+    state: Array.isArray(partner.state_id) ? partner.state_id[1] : "",
+    country: Array.isArray(partner.country_id) ? partner.country_id[1] : "",
+    label: formatPartnerAddress(partner),
+  };
+}
+
+async function attachShippingAddresses(orders) {
+  if (!orders.length) {
+    return orders;
   }
 
-  const deliveryAddresses = await odooCall("res.partner", "search_read", {
-    domain: [
-      ["id", "=", requestedId],
-      ["parent_id", "=", user.partner_id],
-      ["type", "=", "delivery"],
+  const shippingIds = [
+    ...new Set(
+      orders
+        .map((order) => order.partner_shipping_id?.[0])
+        .filter((id) => typeof id === "number" && id > 0)
+    ),
+  ];
+
+  if (!shippingIds.length) {
+    return orders.map((order) => ({ ...order, shipping_address: null }));
+  }
+
+  const partners = await odooCall("res.partner", "read", {
+    args: [
+      shippingIds,
+      [
+        "id",
+        "name",
+        "phone",
+        "mobile",
+        "street",
+        "street2",
+        "city",
+        "zip",
+        "state_id",
+        "country_id",
+      ],
     ],
-    fields: ["id"],
-    limit: 1,
   });
 
-  if (!deliveryAddresses.length) {
+  const partnerMap = new Map(partners.map((partner) => [partner.id, partner]));
+
+  return orders.map((order) => {
+    const shippingId = order.partner_shipping_id?.[0];
+    const partner =
+      typeof shippingId === "number" ? partnerMap.get(shippingId) : null;
+
+    return {
+      ...order,
+      shipping_address: mapShippingAddress(partner),
+    };
+  });
+}
+
+async function readShippingPartner(shippingPartnerId) {
+  const partners = await odooCall("res.partner", "read", {
+    args: [
+      [shippingPartnerId],
+      [
+        "id",
+        "name",
+        "phone",
+        "mobile",
+        "street",
+        "street2",
+        "city",
+        "zip",
+        "state_id",
+        "country_id",
+        "parent_id",
+        "type",
+      ],
+    ],
+  });
+
+  return partners[0] || null;
+}
+
+async function applyOrderShippingAddress(orderId, shippingPartnerId) {
+  const shippingPartner = await readShippingPartner(shippingPartnerId);
+
+  if (!shippingPartner) {
     return null;
   }
 
-  return requestedId;
+  await odooCall("sale.order", "write", {
+    ids: [orderId],
+    vals: {
+      partner_shipping_id: shippingPartnerId,
+    },
+  });
+
+  const orders = await odooCall("sale.order", "read", {
+    args: [[orderId], ["partner_shipping_id"]],
+  });
+
+  const appliedShippingId = orders[0]?.partner_shipping_id?.[0];
+
+  if (appliedShippingId !== shippingPartnerId) {
+    await odooCall("sale.order", "write", {
+      ids: [orderId],
+      vals: {
+        partner_shipping_id: shippingPartnerId,
+      },
+    });
+  }
+
+  return shippingPartner;
 }
 
 function parseItems(rawItems) {
@@ -183,7 +298,6 @@ export async function createCheckout(req, res) {
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
     const {
-      address_id,
       payment_method = "cod",
       order_type = "quotation_sent",
       note = "",
@@ -191,6 +305,8 @@ export async function createCheckout(req, res) {
       delivery_notes = "",
       coupon_code = "",
     } = req.body;
+
+    const address_id = req.body.address_id ?? req.body.addressId;
 
     const items = parseItems(req.body.items);
 
@@ -310,6 +426,8 @@ export async function createCheckout(req, res) {
 
     const orderId = getCreatedId(createdIds);
 
+    await applyOrderShippingAddress(orderId, shippingPartnerId);
+
     // Apply the coupon while the order is still a draft. Odoo's loyalty program
     // adds the discount line and marks the coupon used.
     if (coupon_code) {
@@ -332,14 +450,6 @@ export async function createCheckout(req, res) {
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
       });
-
-      // Odoo can reset the delivery address during confirmation — restore it.
-      await odooCall("sale.order", "write", {
-        ids: [orderId],
-        vals: {
-          partner_shipping_id: shippingPartnerId,
-        },
-      });
     } else if (order_type === "quotation_sent") {
       await odooCall("sale.order", "write", {
         ids: [orderId],
@@ -351,6 +461,15 @@ export async function createCheckout(req, res) {
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
       });
+    }
+
+    const shippingPartner = await applyOrderShippingAddress(orderId, shippingPartnerId);
+
+    if (shippingPartner) {
+      await postOrderChatter(
+        orderId,
+        `QR Shop delivery branch selected:\n${formatPartnerAddress(shippingPartner)}`
+      );
     }
 
     if (payment_method === "wire_transfer") {
@@ -370,22 +489,24 @@ export async function createCheckout(req, res) {
       );
     }
 
-    const orders = await odooCall("sale.order", "search_read", {
-      domain: [["id", "=", orderId]],
-      fields: [
-        "id",
-        "name",
-        "state",
-        "amount_total",
-        "partner_id",
-        "partner_shipping_id",
-        "date_order",
-        "note",
-        "x_studio_preferred_delivery_date",
-        "x_studio_delivery_notes",
-      ],
-      limit: 1,
-    });
+    const orders = await attachShippingAddresses(
+      await odooCall("sale.order", "search_read", {
+        domain: [["id", "=", orderId]],
+        fields: [
+          "id",
+          "name",
+          "state",
+          "amount_total",
+          "partner_id",
+          "partner_shipping_id",
+          "date_order",
+          "note",
+          "x_studio_preferred_delivery_date",
+          "x_studio_delivery_notes",
+        ],
+        limit: 1,
+      })
+    );
 
     return success(res, {
       message: coupon_code
@@ -410,23 +531,25 @@ export async function getOrders(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
-    const orders = await odooCall("sale.order", "search_read", {
-      domain: [["partner_id", "=", user.partner_id]],
-      fields: [
-        "id",
-        "name",
-        "state",
-        "amount_total",
-        "date_order",
-        "partner_id",
-        "partner_shipping_id",
-        "order_line",
-        "x_studio_preferred_delivery_date",
-        "x_studio_delivery_notes",
-      ],
-      order: "date_order desc",
-      limit: 50,
-    });
+    const orders = await attachShippingAddresses(
+      await odooCall("sale.order", "search_read", {
+        domain: [["partner_id", "=", user.partner_id]],
+        fields: [
+          "id",
+          "name",
+          "state",
+          "amount_total",
+          "date_order",
+          "partner_id",
+          "partner_shipping_id",
+          "order_line",
+          "x_studio_preferred_delivery_date",
+          "x_studio_delivery_notes",
+        ],
+        order: "date_order desc",
+        limit: 50,
+      })
+    );
 
     return success(res, { orders });
   } catch (err) {
@@ -442,26 +565,28 @@ export async function getOrderById(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!orderId) return error(res, "Invalid order ID", 400);
 
-    const orders = await odooCall("sale.order", "search_read", {
-      domain: [
-        ["id", "=", orderId],
-        ["partner_id", "=", user.partner_id],
-      ],
-      fields: [
-        "id",
-        "name",
-        "state",
-        "amount_total",
-        "date_order",
-        "partner_id",
-        "partner_shipping_id",
-        "order_line",
-        "note",
-        "x_studio_preferred_delivery_date",
-        "x_studio_delivery_notes",
-      ],
-      limit: 1,
-    });
+    const orders = await attachShippingAddresses(
+      await odooCall("sale.order", "search_read", {
+        domain: [
+          ["id", "=", orderId],
+          ["partner_id", "=", user.partner_id],
+        ],
+        fields: [
+          "id",
+          "name",
+          "state",
+          "amount_total",
+          "date_order",
+          "partner_id",
+          "partner_shipping_id",
+          "order_line",
+          "note",
+          "x_studio_preferred_delivery_date",
+          "x_studio_delivery_notes",
+        ],
+        limit: 1,
+      })
+    );
 
     if (!orders.length) return error(res, "Order not found", 404);
 
@@ -551,20 +676,22 @@ export async function reorder(req, res) {
 
     const newOrderId = getCreatedId(createdIds);
 
-    const newOrders = await odooCall("sale.order", "search_read", {
-      domain: [["id", "=", newOrderId]],
-      fields: [
-        "id",
-        "name",
-        "state",
-        "amount_total",
-        "date_order",
-        "partner_shipping_id",
-        "x_studio_preferred_delivery_date",
-        "x_studio_delivery_notes",
-      ],
-      limit: 1,
-    });
+    const newOrders = await attachShippingAddresses(
+      await odooCall("sale.order", "search_read", {
+        domain: [["id", "=", newOrderId]],
+        fields: [
+          "id",
+          "name",
+          "state",
+          "amount_total",
+          "date_order",
+          "partner_shipping_id",
+          "x_studio_preferred_delivery_date",
+          "x_studio_delivery_notes",
+        ],
+        limit: 1,
+      })
+    );
 
     return success(res, {
       message: "Reorder quotation created",

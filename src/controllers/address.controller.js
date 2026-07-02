@@ -1,7 +1,11 @@
 import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
-import { normalizePhone } from "../utils/phone.js";
+import { normalizePhone, getPhoneSearchTail, phonesMatch } from "../utils/phone.js";
+import {
+  getAccountAddresses,
+  isManagedChildAddress,
+} from "../utils/partner-scope.js";
 
 function getOdooError(err) {
   return (
@@ -57,6 +61,40 @@ async function getMyanmarCountryId() {
   return countries[0]?.id || 156;
 }
 
+async function findExistingPartnerWithPhone(phone, excludePartnerIds = []) {
+  const searchTail = getPhoneSearchTail(phone);
+
+  if (!searchTail || searchTail.length < 7) {
+    return null;
+  }
+
+  const partners = await odooCall("res.partner", "search_read", {
+    domain: [
+      "|",
+      ["phone", "ilike", searchTail],
+      ["mobile", "ilike", searchTail],
+    ],
+    fields: ["id", "name", "phone", "mobile"],
+    limit: 50,
+  });
+
+  const excluded = new Set(
+    excludePartnerIds
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+
+  return (
+    partners.find((partner) => {
+      if (excluded.has(partner.id)) {
+        return false;
+      }
+
+      return phonesMatch(phone, partner.phone) || phonesMatch(phone, partner.mobile);
+    }) || null
+  );
+}
+
 export async function getAddressMeta(req, res) {
   try {
     const user = getAuthUser(req);
@@ -87,29 +125,7 @@ export async function getAddresses(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
-    const addresses = await odooCall("res.partner", "search_read", {
-      domain: [
-        "|",
-        ["id", "=", user.partner_id],
-        "&",
-        ["parent_id", "=", user.partner_id],
-        ["type", "=", "delivery"],
-      ],
-      fields: [
-        "id",
-        "name",
-        "phone",
-        "street",
-        "street2",
-        "city",
-        "zip",
-        "state_id",
-        "country_id",
-        "type",
-        "parent_id",
-      ],
-      limit: 100,
-    });
+    const addresses = await getAccountAddresses(user.partner_id);
 
     return success(res, { addresses });
   } catch (err) {
@@ -144,6 +160,18 @@ export async function createAddress(req, res) {
       return error(res, "Phone is required", 400);
     }
 
+    const normalizedPhone = normalizePhone(phone);
+    const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone);
+
+    if (duplicatePartner) {
+      return error(
+        res,
+        "This phone number is already used by another contact.",
+        400,
+        { code: "PHONE_ALREADY_USED" }
+      );
+    }
+
     const countryId = country_id ? Number(country_id) : await getMyanmarCountryId();
     const resolvedStateId = state_id
       ? Number(state_id)
@@ -155,7 +183,7 @@ export async function createAddress(req, res) {
           parent_id: user.partner_id,
           type: "delivery",
           name: String(name).trim(),
-          phone: normalizePhone(phone),
+          phone: normalizedPhone,
           street: street || false,
           street2: street2 || false,
           city: city || false,
@@ -186,22 +214,31 @@ export async function updateAddress(req, res) {
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
     if (!addressId) return error(res, "Invalid address ID", 400);
 
-    const addresses = await odooCall("res.partner", "search_read", {
-      domain: [
-        ["id", "=", addressId],
-        ["parent_id", "=", user.partner_id],
-        ["type", "=", "delivery"],
-      ],
-      fields: ["id"],
-      limit: 1,
-    });
+    const isEditable = await isManagedChildAddress(addressId, user.partner_id);
 
-    if (!addresses.length) return error(res, "Address not found", 404);
+    if (!isEditable) return error(res, "Address not found", 404);
 
     const vals = {};
 
     if (req.body.name !== undefined) vals.name = String(req.body.name).trim();
-    if (req.body.phone !== undefined) vals.phone = req.body.phone ? normalizePhone(req.body.phone) : false;
+    if (req.body.phone !== undefined) {
+      const normalizedPhone = req.body.phone ? normalizePhone(req.body.phone) : false;
+
+      if (normalizedPhone) {
+        const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone, [addressId]);
+
+        if (duplicatePartner) {
+          return error(
+            res,
+            "This phone number is already used by another contact.",
+            400,
+            { code: "PHONE_ALREADY_USED" }
+          );
+        }
+      }
+
+      vals.phone = normalizedPhone;
+    }
     if (req.body.street !== undefined) vals.street = req.body.street || false;
     if (req.body.street2 !== undefined) vals.street2 = req.body.street2 || false;
     if (req.body.city !== undefined) vals.city = req.body.city || false;
@@ -235,17 +272,9 @@ export async function deleteAddress(req, res) {
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
     if (!addressId) return error(res, "Invalid address ID", 400);
 
-    const addresses = await odooCall("res.partner", "search_read", {
-      domain: [
-        ["id", "=", addressId],
-        ["parent_id", "=", user.partner_id],
-        ["type", "=", "delivery"],
-      ],
-      fields: ["id"],
-      limit: 1,
-    });
+    const isEditable = await isManagedChildAddress(addressId, user.partner_id);
 
-    if (!addresses.length) return error(res, "Address not found", 404);
+    if (!isEditable) return error(res, "Address not found", 404);
 
     await odooCall("res.partner", "write", {
       ids: [addressId],
