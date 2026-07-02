@@ -70,12 +70,8 @@ async function findExistingPartnerWithPhone(phone, excludePartnerIds = []) {
   }
 
   const partners = await odooCall("res.partner", "search_read", {
-    domain: [
-      "|",
-      ["phone", "ilike", searchTail],
-      ["mobile", "ilike", searchTail],
-    ],
-    fields: ["id", "name", "phone", "mobile"],
+    domain: [["phone", "ilike", searchTail]],
+    fields: ["id", "name", "phone"],
     limit: 50,
   });
 
@@ -91,7 +87,7 @@ async function findExistingPartnerWithPhone(phone, excludePartnerIds = []) {
         return false;
       }
 
-      return phonesMatch(phone, partner.phone) || phonesMatch(phone, partner.mobile);
+      return phonesMatch(phone, partner.phone);
     }) || null
   );
 }

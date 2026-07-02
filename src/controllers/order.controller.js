@@ -64,7 +64,7 @@ function formatPartnerAddress(partner) {
 
   const lines = [
     partner.name,
-    partner.phone || partner.mobile,
+    partner.phone,
     partner.street,
     partner.street2,
     [partner.city, partner.zip].filter(Boolean).join(" "),
@@ -83,7 +83,7 @@ function mapShippingAddress(partner) {
   return {
     id: partner.id,
     name: partner.name || "",
-    phone: partner.phone || partner.mobile || "",
+    phone: partner.phone || "",
     street: partner.street || "",
     street2: partner.street2 || "",
     city: partner.city || "",
@@ -118,7 +118,6 @@ async function attachShippingAddresses(orders) {
         "id",
         "name",
         "phone",
-        "mobile",
         "street",
         "street2",
         "city",
@@ -151,7 +150,6 @@ async function readShippingPartner(shippingPartnerId) {
         "id",
         "name",
         "phone",
-        "mobile",
         "street",
         "street2",
         "city",
