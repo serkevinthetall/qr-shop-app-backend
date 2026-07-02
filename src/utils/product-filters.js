@@ -6,6 +6,7 @@ export const APP_PRODUCT_FIELDS = [
   "list_price",
   "description_sale",
   "description",
+  "description_ecommerce",
   "website_description",
   "categ_id",
   "uom_id",

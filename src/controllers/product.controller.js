@@ -19,6 +19,7 @@ function formatProduct(product) {
     list_price: product.list_price || 0,
     description_sale: product.description_sale || "",
     description: product.description || "",
+    description_ecommerce: product.description_ecommerce || "",
     website_description: product.website_description || "",
     categ_id: product.categ_id || false,
     uom_id: product.uom_id || false,
