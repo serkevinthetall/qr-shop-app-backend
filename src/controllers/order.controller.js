@@ -42,6 +42,47 @@ function getOdooError(err) {
   );
 }
 
+function parseScalarId(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    return parseScalarId(value[0]);
+  }
+
+  const id = Number(value);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+async function resolveShippingPartnerId(user, rawAddressId) {
+  const requestedId = parseScalarId(rawAddressId);
+
+  if (!requestedId) {
+    return null;
+  }
+
+  if (requestedId === user.partner_id) {
+    return user.partner_id;
+  }
+
+  const deliveryAddresses = await odooCall("res.partner", "search_read", {
+    domain: [
+      ["id", "=", requestedId],
+      ["parent_id", "=", user.partner_id],
+      ["type", "=", "delivery"],
+    ],
+    fields: ["id"],
+    limit: 1,
+  });
+
+  if (!deliveryAddresses.length) {
+    return null;
+  }
+
+  return requestedId;
+}
+
 function parseItems(rawItems) {
   if (Array.isArray(rawItems)) return rawItems;
 
@@ -165,6 +206,18 @@ export async function createCheckout(req, res) {
       return error(res, "Payment screenshot is required for wire transfer", 400);
     }
 
+    const shippingPartnerId = await resolveShippingPartnerId(user, address_id);
+
+    if (!shippingPartnerId) {
+      return error(
+        res,
+        parseScalarId(address_id)
+          ? "Selected delivery address is invalid"
+          : "Delivery address is required",
+        400
+      );
+    }
+
     const orderLines = [];
     let cartSubtotal = 0;
 
@@ -236,7 +289,7 @@ export async function createCheckout(req, res) {
     const orderVals = {
       partner_id: user.partner_id,
       partner_invoice_id: user.partner_id,
-      partner_shipping_id: address_id ? Number(address_id) : user.partner_id,
+      partner_shipping_id: shippingPartnerId,
 
       x_studio_preferred_delivery_date: preferred_delivery_date || false,
       x_studio_delivery_notes: delivery_notes || false,
@@ -278,6 +331,14 @@ export async function createCheckout(req, res) {
       // automation that flips the membership coupon ticket status to "Used".
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
+      });
+
+      // Odoo can reset the delivery address during confirmation — restore it.
+      await odooCall("sale.order", "write", {
+        ids: [orderId],
+        vals: {
+          partner_shipping_id: shippingPartnerId,
+        },
       });
     } else if (order_type === "quotation_sent") {
       await odooCall("sale.order", "write", {

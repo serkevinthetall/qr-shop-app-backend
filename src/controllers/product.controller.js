@@ -1,36 +1,44 @@
 import { success, error } from "../utils/response.js";
 import { odooCall } from "../services/odoo.service.js";
+import {
+  APP_PRODUCT_FIELDS,
+  getAppProductDomain,
+  getImageUrl,
+} from "../utils/product-filters.js";
 
 function getOdooBaseUrl() {
   return String(process.env.ODOO_URL || "").trim().replace(/\/$/, "");
 }
 
-function getImageUrl(productId) {
-  return `/api/products/${productId}/image`;
-}
-
 function formatProduct(product) {
+  const writeDate = product.write_date || "";
+
   return {
     id: product.id,
     name: product.name,
     list_price: product.list_price || 0,
     description_sale: product.description_sale || "",
     description: product.description || "",
+    website_description: product.website_description || "",
     categ_id: product.categ_id || false,
     uom_id: product.uom_id || false,
     product_variant_id: product.product_variant_id || false,
-    image_url: getImageUrl(product.id),
+    write_date: writeDate,
+    image_url: getImageUrl(product.id, writeDate),
   };
 }
 
 function formatSimilarProduct(product) {
+  const writeDate = product.write_date || "";
+
   return {
     id: product.id,
     name: product.name,
     list_price: product.list_price || 0,
     description_sale: product.description_sale || "",
     categ_id: product.categ_id || false,
-    image_url: getImageUrl(product.id),
+    write_date: writeDate,
+    image_url: getImageUrl(product.id, writeDate),
   };
 }
 
@@ -50,6 +58,16 @@ export async function getProductImage(req, res) {
 
     if (!id) {
       return error(res, "Invalid product ID", 400);
+    }
+
+    const products = await odooCall("product.template", "search_read", {
+      domain: getAppProductDomain([["id", "=", id]]),
+      fields: ["id", "write_date"],
+      limit: 1,
+    });
+
+    if (!products.length) {
+      return error(res, "Product image not found", 404);
     }
 
     const odooBaseUrl = getOdooBaseUrl();
@@ -72,7 +90,7 @@ export async function getProductImage(req, res) {
     const buffer = Buffer.from(await imageResponse.arrayBuffer());
 
     res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Cache-Control", "public, max-age=300, must-revalidate");
 
     return res.send(buffer);
   } catch (err) {
@@ -86,10 +104,7 @@ export async function getProducts(req, res) {
     const offset = Number(req.query.offset || 0);
     const categoryId = Number(req.query.category_id || 0);
 
-    const domain = [
-      ["sale_ok", "=", true],
-      ["website_published", "=", true],
-    ];
+    const domain = getAppProductDomain();
 
     if (categoryId) {
       domain.push(["categ_id", "=", categoryId]);
@@ -97,16 +112,7 @@ export async function getProducts(req, res) {
 
     const products = await odooCall("product.template", "search_read", {
       domain,
-      fields: [
-        "id",
-        "name",
-        "list_price",
-        "description_sale",
-        "description",
-        "categ_id",
-        "uom_id",
-        "product_variant_id",
-      ],
+      fields: APP_PRODUCT_FIELDS,
       limit,
       offset,
       order: "name asc",
@@ -133,17 +139,8 @@ export async function getProductById(req, res) {
     }
 
     const products = await odooCall("product.template", "search_read", {
-      domain: [["id", "=", id]],
-      fields: [
-        "id",
-        "name",
-        "list_price",
-        "description_sale",
-        "description",
-        "categ_id",
-        "uom_id",
-        "product_variant_id",
-      ],
+      domain: getAppProductDomain([["id", "=", id]]),
+      fields: APP_PRODUCT_FIELDS,
       limit: 1,
     });
 
@@ -160,18 +157,17 @@ export async function getProductById(req, res) {
 
     if (product.categ_id && product.categ_id[0]) {
       similarProducts = await odooCall("product.template", "search_read", {
-        domain: [
-          ["sale_ok", "=", true],
-          ["website_published", "=", true],
+        domain: getAppProductDomain([
           ["categ_id", "=", product.categ_id[0]],
           ["id", "!=", product.id],
-        ],
+        ]),
         fields: [
           "id",
           "name",
           "list_price",
           "description_sale",
           "categ_id",
+          "write_date",
         ],
         limit: similarLimit,
         order: "name asc",
@@ -196,11 +192,7 @@ export async function searchProducts(req, res) {
       return error(res, "Search query is required", 400);
     }
 
-    const domain = [
-      ["sale_ok", "=", true],
-      ["website_published", "=", true],
-      ["name", "ilike", q],
-    ];
+    const domain = getAppProductDomain([["name", "ilike", q]]);
 
     if (categoryId) {
       domain.push(["categ_id", "=", categoryId]);
@@ -208,16 +200,7 @@ export async function searchProducts(req, res) {
 
     const products = await odooCall("product.template", "search_read", {
       domain,
-      fields: [
-        "id",
-        "name",
-        "list_price",
-        "description_sale",
-        "description",
-        "categ_id",
-        "uom_id",
-        "product_variant_id",
-      ],
+      fields: APP_PRODUCT_FIELDS,
       limit: 30,
       order: "name asc",
     });
@@ -241,10 +224,7 @@ const EXCLUDED_CATEGORY_NAMES = new Set([
 export async function getCategories(req, res) {
   try {
     const products = await odooCall("product.template", "search_read", {
-      domain: [
-        ["sale_ok", "=", true],
-        ["website_published", "=", true],
-      ],
+      domain: getAppProductDomain(),
       fields: ["categ_id"],
       limit: 1000,
     });

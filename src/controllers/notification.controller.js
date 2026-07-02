@@ -12,6 +12,10 @@ import {
   removePushToken,
   upsertPushToken,
 } from "../services/push-token.store.js";
+import {
+  getAppProductDomain,
+  isNewRibbonProduct,
+} from "../utils/product-filters.js";
 
 const NEW_PRODUCT_LIMIT = 20;
 const NEW_COUPON_LIMIT = 20;
@@ -63,6 +67,20 @@ function getWebhookRecordId(body) {
   const raw = body?._id ?? body?.id ?? body?.record_id;
 
   return Number(raw) || 0;
+}
+
+async function loadAppProduct(productId) {
+  if (!productId) {
+    return null;
+  }
+
+  const products = await odooCall("product.template", "search_read", {
+    domain: getAppProductDomain([["id", "=", productId]]),
+    fields: ["id", "name", "website_ribbon_id"],
+    limit: 1,
+  });
+
+  return products[0] || null;
 }
 
 function getWebhookPartnerId(body) {
@@ -161,19 +179,16 @@ export async function webhookNewProduct(req, res) {
     const productId = getWebhookRecordId(req.body);
     let productName = String(req.body?.name || "").trim();
 
-    if (productId && !productName) {
-      const products = await odooCall("product.template", "search_read", {
-        domain: [["id", "=", productId]],
-        fields: ["id", "name", "sale_ok"],
-        limit: 1,
+    const product = await loadAppProduct(productId);
+
+    if (!product || !isNewRibbonProduct(product)) {
+      return success(res, {
+        message: "Product ignored (must be app-tagged, published, and ribbon New)",
+        sent: 0,
       });
-
-      if (!products.length || !products[0].sale_ok) {
-        return success(res, { message: "Product ignored", sent: 0 });
-      }
-
-      productName = products[0].name;
     }
+
+    productName = productName || product.name;
 
     const tokens = await getAllPushTokens();
 
@@ -257,13 +272,11 @@ export async function getNotifications(req, res) {
 
     const notifications = [];
 
-    // New-product notifications (shown to every signed-in user). Only products
-    // created today (local time) are included. We only require the product to be
-    // sellable — a freshly created product is usually not website-published yet,
-    // so requiring publication would suppress the alert.
+    // New-product notifications: app-tagged, published, sellable, ribbon = New.
     const products = await odooCall("product.template", "search_read", {
       domain: [
-        ["sale_ok", "=", true],
+        ...getAppProductDomain(),
+        ["website_ribbon_id.name", "ilike", "new"],
         ["create_date", ">=", getStartOfTodayUtc()],
       ],
       fields: ["id", "name", "create_date"],

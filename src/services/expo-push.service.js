@@ -53,7 +53,7 @@ export async function sendExpoPushMessages(messages) {
 
 export function buildProductPushMessages(tokens, product) {
   const title = "New product";
-  const body = `Hello QR member, check out ${product.name || "this product"}.`;
+  const body = `Hello QR member, check out ${product.name || "this new product"}.`;
 
   return tokens.map((to) => ({
     to,
