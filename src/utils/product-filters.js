@@ -1,18 +1,22 @@
-export const APP_PRODUCT_TAG = "app";
+export const APP_PRODUCT_TAG = "QR App";
 
 export const APP_PRODUCT_FIELDS = [
   "id",
   "name",
   "list_price",
+  "compare_list_price",
   "description_sale",
   "description",
   "description_ecommerce",
   "website_description",
   "categ_id",
+  "public_categ_ids",
   "uom_id",
   "product_variant_id",
   "write_date",
   "website_ribbon_id",
+  "allow_out_of_stock_order",
+  "publish_date",
 ];
 
 export function getAppProductDomain(extra = []) {

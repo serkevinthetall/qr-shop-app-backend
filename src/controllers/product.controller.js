@@ -5,12 +5,13 @@ import {
   getAppProductDomain,
   getImageUrl,
 } from "../utils/product-filters.js";
+import { resolveProductRibbons } from "../utils/product-ribbon.js";
 
 function getOdooBaseUrl() {
   return String(process.env.ODOO_URL || "").trim().replace(/\/$/, "");
 }
 
-function formatProduct(product) {
+function formatProduct(product, ribbon = null) {
   const writeDate = product.write_date || "";
 
   return {
@@ -26,7 +27,14 @@ function formatProduct(product) {
     product_variant_id: product.product_variant_id || false,
     write_date: writeDate,
     image_url: getImageUrl(product.id, writeDate),
+    ribbon,
   };
+}
+
+async function formatProducts(products) {
+  const ribbons = await resolveProductRibbons(odooCall, products);
+
+  return products.map((product, index) => formatProduct(product, ribbons[index]));
 }
 
 function formatSimilarProduct(product) {
@@ -108,7 +116,7 @@ export async function getProducts(req, res) {
     const domain = getAppProductDomain();
 
     if (categoryId) {
-      domain.push(["categ_id", "=", categoryId]);
+      domain.push(["public_categ_ids", "in", [categoryId]]);
     }
 
     const products = await odooCall("product.template", "search_read", {
@@ -120,7 +128,7 @@ export async function getProducts(req, res) {
     });
 
     return success(res, {
-      products: products.map(formatProduct),
+      products: await formatProducts(products),
       limit,
       offset,
       count: products.length,
@@ -175,9 +183,17 @@ export async function getProductById(req, res) {
       });
     }
 
+    const [productWithRibbon] = await formatProducts([product]);
+    const similarRibbons = similarProducts.length
+      ? await resolveProductRibbons(odooCall, similarProducts)
+      : [];
+
     return success(res, {
-      product: formatProduct(product),
-      similar_products: similarProducts.map(formatSimilarProduct),
+      product: productWithRibbon,
+      similar_products: similarProducts.map((similarProduct, index) => ({
+        ...formatSimilarProduct(similarProduct),
+        ribbon: similarRibbons[index] || null,
+      })),
     });
   } catch (err) {
     return error(res, "Failed to get product", 500, getOdooError(err));
@@ -196,7 +212,7 @@ export async function searchProducts(req, res) {
     const domain = getAppProductDomain([["name", "ilike", q]]);
 
     if (categoryId) {
-      domain.push(["categ_id", "=", categoryId]);
+      domain.push(["public_categ_ids", "in", [categoryId]]);
     }
 
     const products = await odooCall("product.template", "search_read", {
@@ -207,7 +223,7 @@ export async function searchProducts(req, res) {
     });
 
     return success(res, {
-      products: products.map(formatProduct),
+      products: await formatProducts(products),
       count: products.length,
     });
   } catch (err) {
@@ -226,16 +242,12 @@ export async function getCategories(req, res) {
   try {
     const products = await odooCall("product.template", "search_read", {
       domain: getAppProductDomain(),
-      fields: ["categ_id"],
+      fields: ["public_categ_ids"],
       limit: 1000,
     });
 
     const categoryIds = [
-      ...new Set(
-        products
-          .map((product) => product.categ_id?.[0])
-          .filter((id) => typeof id === "number")
-      ),
+      ...new Set(products.flatMap((product) => product.public_categ_ids || [])),
     ];
 
     if (!categoryIds.length) {
@@ -245,7 +257,7 @@ export async function getCategories(req, res) {
       });
     }
 
-    const categories = await odooCall("product.category", "search_read", {
+    const categories = await odooCall("product.public.category", "search_read", {
       domain: [["id", "in", categoryIds]],
       fields: ["id", "name", "parent_id"],
       order: "name asc",
