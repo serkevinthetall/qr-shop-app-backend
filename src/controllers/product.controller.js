@@ -5,7 +5,7 @@ import {
   getAppProductDomain,
   getImageUrl,
 } from "../utils/product-filters.js";
-import { resolveProductRibbons } from "../utils/product-ribbon.js";
+import { resolveProductRibbonFast } from "../utils/product-ribbon.js";
 
 function getOdooBaseUrl() {
   return String(process.env.ODOO_URL || "").trim().replace(/\/$/, "");
@@ -164,29 +164,35 @@ export async function getProductById(req, res) {
 
     let similarProducts = [];
 
-    if (product.categ_id && product.categ_id[0]) {
-      similarProducts = await odooCall("product.template", "search_read", {
-        domain: getAppProductDomain([
-          ["categ_id", "=", product.categ_id[0]],
-          ["id", "!=", product.id],
-        ]),
-        fields: [
-          "id",
-          "name",
-          "list_price",
-          "description_sale",
-          "categ_id",
-          "write_date",
-        ],
-        limit: similarLimit,
-        order: "name asc",
-      });
-    }
+    const similarPromise =
+      product.categ_id && product.categ_id[0]
+        ? odooCall("product.template", "search_read", {
+            domain: getAppProductDomain([
+              ["categ_id", "=", product.categ_id[0]],
+              ["id", "!=", product.id],
+            ]),
+            fields: [
+              "id",
+              "name",
+              "list_price",
+              "description_sale",
+              "categ_id",
+              "write_date",
+            ],
+            limit: similarLimit,
+            order: "name asc",
+          })
+        : Promise.resolve([]);
 
-    const [productWithRibbon] = await formatProducts([product]);
+    const [ribbon, similarProductsResult] = await Promise.all([
+      resolveProductRibbonFast(odooCall, product),
+      similarPromise,
+    ]);
+
+    similarProducts = similarProductsResult;
 
     return success(res, {
-      product: productWithRibbon,
+      product: formatProduct(product, ribbon),
       similar_products: similarProducts.map((similarProduct) => formatSimilarProduct(similarProduct)),
     });
   } catch (err) {

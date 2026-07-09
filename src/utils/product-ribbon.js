@@ -268,6 +268,22 @@ async function buildPriceValsMap(odooCall, products) {
   );
 }
 
+export async function resolveProductRibbonFast(odooCall, product) {
+  const manualRibbonId = getMany2oneId(product.website_ribbon_id);
+
+  if (manualRibbonId) {
+    const ribbonMap = await readRibbonsByIds(odooCall, [manualRibbonId]);
+    const ribbon = formatRibbonRecord(ribbonMap.get(manualRibbonId));
+
+    if (ribbon) {
+      return ribbon;
+    }
+  }
+
+  const [ribbon] = await resolveProductRibbons(odooCall, [product]);
+  return ribbon || null;
+}
+
 export async function resolveProductRibbons(odooCall, products) {
   if (!products.length) {
     return [];
