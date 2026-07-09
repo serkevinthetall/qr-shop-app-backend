@@ -1,3 +1,5 @@
+import { getPushCopy } from "../utils/push-i18n.js";
+
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 const ANDROID_CHANNEL_ID = "default";
 
@@ -51,36 +53,39 @@ export async function sendExpoPushMessages(messages) {
   return { data: results };
 }
 
-export function buildProductPushMessages(tokens, product) {
-  const title = "New product";
-  const body = `Hello QR member, check out ${product.name || "this new product"}.`;
+export function buildProductPushMessages(entries, product) {
+  return entries.map(({ to, language }) => {
+    const copy = getPushCopy(language);
 
-  return tokens.map((to) => ({
-    to,
-    sound: "default",
-    title,
-    body,
-    channelId: ANDROID_CHANNEL_ID,
-    data: {
-      type: "product",
-      productId: product.id,
-    },
-  }));
+    return {
+      to,
+      sound: "default",
+      title: copy.productTitle,
+      body: copy.productBody(product.name),
+      channelId: ANDROID_CHANNEL_ID,
+      data: {
+        type: "product",
+        productId: product.id,
+        productName: product.name || "",
+      },
+    };
+  });
 }
 
-export function buildCouponPushMessages(tokens, coupon) {
-  const title = "New coupon for you";
-  const body = `A new coupon ${coupon.code || ""} is ready for you.`.trim();
+export function buildCouponPushMessages(entries, coupon) {
+  return entries.map(({ to, language }) => {
+    const copy = getPushCopy(language);
 
-  return tokens.map((to) => ({
-    to,
-    sound: "default",
-    title,
-    body,
-    channelId: ANDROID_CHANNEL_ID,
-    data: {
-      type: "coupon",
-      couponCode: coupon.code || "",
-    },
-  }));
+    return {
+      to,
+      sound: "default",
+      title: copy.couponTitle,
+      body: copy.couponBody(coupon.code),
+      channelId: ANDROID_CHANNEL_ID,
+      data: {
+        type: "coupon",
+        couponCode: coupon.code || "",
+      },
+    };
+  });
 }

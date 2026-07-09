@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
+import { normalizePushLanguage } from "../utils/push-i18n.js";
 import { odooCall } from "./odoo.service.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,18 +58,7 @@ async function readOdooToken(partnerId) {
   return isValidExpoToken(token) ? token : null;
 }
 
-async function readAllOdooTokens() {
-  const partners = await odooCall("res.partner", "search_read", {
-    domain: [[PARTNER_FIELD, "!=", false]],
-    fields: ["id", PARTNER_FIELD],
-  });
-
-  return partners
-    .map((partner) => String(partner[PARTNER_FIELD] || "").trim())
-    .filter(isValidExpoToken);
-}
-
-async function upsertFileToken({ partnerId, uid, expoPushToken }) {
+async function upsertFileToken({ partnerId, uid, expoPushToken, language }) {
   const store = await readFileStore();
   const now = new Date().toISOString();
   const existing = store.tokens.find((item) => item.partner_id === partnerId);
@@ -76,12 +66,14 @@ async function upsertFileToken({ partnerId, uid, expoPushToken }) {
   if (existing) {
     existing.uid = uid;
     existing.expo_push_token = expoPushToken;
+    existing.language = normalizePushLanguage(language || existing.language);
     existing.updated_at = now;
   } else {
     store.tokens.push({
       partner_id: partnerId,
       uid,
       expo_push_token: expoPushToken,
+      language: normalizePushLanguage(language),
       updated_at: now,
     });
   }
@@ -101,12 +93,49 @@ async function removeFileToken(partnerId) {
   return true;
 }
 
-function uniqueTokens(tokens) {
-  return [...new Set(tokens.filter(isValidExpoToken))];
+function toTokenEntry(token, language = "my", partnerId = null) {
+  const normalized = String(token || "").trim();
+
+  if (!isValidExpoToken(normalized)) {
+    return null;
+  }
+
+  return {
+    to: normalized,
+    language: normalizePushLanguage(language),
+    partner_id: partnerId,
+  };
 }
 
-export async function upsertPushToken({ partnerId, uid, expoPushToken }) {
-  await upsertFileToken({ partnerId, uid, expoPushToken });
+function mergeTokenEntries(...lists) {
+  const byToken = new Map();
+
+  for (const list of lists) {
+    for (const entry of list) {
+      if (!entry?.to) {
+        continue;
+      }
+
+      const existing = byToken.get(entry.to);
+
+      if (!existing) {
+        byToken.set(entry.to, entry);
+        continue;
+      }
+
+      byToken.set(entry.to, {
+        ...existing,
+        language: entry.language || existing.language,
+        partner_id: existing.partner_id ?? entry.partner_id ?? null,
+      });
+    }
+  }
+
+  return [...byToken.values()];
+}
+
+export async function upsertPushToken({ partnerId, uid, expoPushToken, language }) {
+  await upsertFileToken({ partnerId, uid, expoPushToken, language });
 
   try {
     await writeOdooToken(partnerId, expoPushToken);
@@ -135,36 +164,74 @@ export async function removePushToken(partnerId) {
   return true;
 }
 
-export async function getAllPushTokens() {
-  const fileTokens = (await readFileStore()).tokens
-    .map((item) => String(item.expo_push_token || "").trim())
-    .filter(isValidExpoToken);
+export async function getAllPushTokenEntries() {
+  const fileEntries = (await readFileStore()).tokens
+    .map((item) =>
+      toTokenEntry(item.expo_push_token, item.language, item.partner_id)
+    )
+    .filter(Boolean);
 
   try {
-    const odooTokens = await readAllOdooTokens();
-    return uniqueTokens([...odooTokens, ...fileTokens]);
+    const partners = await odooCall("res.partner", "search_read", {
+      domain: [[PARTNER_FIELD, "!=", false]],
+      fields: ["id", PARTNER_FIELD],
+    });
+
+    const odooEntries = partners
+      .map((partner) => {
+        const fileMatch = fileEntries.find(
+          (entry) => entry.partner_id === partner.id
+        );
+
+        return toTokenEntry(
+          partner[PARTNER_FIELD],
+          fileMatch?.language,
+          partner.id
+        );
+      })
+      .filter(Boolean);
+
+    return mergeTokenEntries(fileEntries, odooEntries);
   } catch (err) {
     console.warn("Odoo push token read failed; using local file store only:", err.message);
-    return uniqueTokens(fileTokens);
+    return mergeTokenEntries(fileEntries);
   }
 }
 
-export async function getPushTokensForPartner(partnerId) {
-  const fileTokens = (await readFileStore()).tokens
+export async function getAllPushTokens() {
+  const entries = await getAllPushTokenEntries();
+  return entries.map((entry) => entry.to);
+}
+
+export async function getPushTokenEntriesForPartner(partnerId) {
+  const fileEntries = (await readFileStore()).tokens
     .filter((item) => item.partner_id === partnerId)
-    .map((item) => String(item.expo_push_token || "").trim())
-    .filter(isValidExpoToken);
+    .map((item) =>
+      toTokenEntry(item.expo_push_token, item.language, item.partner_id)
+    )
+    .filter(Boolean);
 
   try {
     const odooToken = await readOdooToken(partnerId);
-    return uniqueTokens(odooToken ? [odooToken, ...fileTokens] : fileTokens);
+    const odooEntry = toTokenEntry(
+      odooToken,
+      fileEntries[0]?.language,
+      partnerId
+    );
+
+    return mergeTokenEntries(odooEntry ? [odooEntry] : [], fileEntries);
   } catch (err) {
     console.warn(
       "Odoo partner push token read failed; using local file store only:",
       err.message
     );
-    return uniqueTokens(fileTokens);
+    return mergeTokenEntries(fileEntries);
   }
+}
+
+export async function getPushTokensForPartner(partnerId) {
+  const entries = await getPushTokenEntriesForPartner(partnerId);
+  return entries.map((entry) => entry.to);
 }
 
 export async function getPushTokenForPartner(partnerId) {

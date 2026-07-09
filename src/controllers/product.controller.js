@@ -184,16 +184,10 @@ export async function getProductById(req, res) {
     }
 
     const [productWithRibbon] = await formatProducts([product]);
-    const similarRibbons = similarProducts.length
-      ? await resolveProductRibbons(odooCall, similarProducts)
-      : [];
 
     return success(res, {
       product: productWithRibbon,
-      similar_products: similarProducts.map((similarProduct, index) => ({
-        ...formatSimilarProduct(similarProduct),
-        ribbon: similarRibbons[index] || null,
-      })),
+      similar_products: similarProducts.map((similarProduct) => formatSimilarProduct(similarProduct)),
     });
   } catch (err) {
     return error(res, "Failed to get product", 500, getOdooError(err));

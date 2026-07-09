@@ -6,9 +6,10 @@ import {
   buildProductPushMessages,
   sendExpoPushMessages,
 } from "../services/expo-push.service.js";
+import { getPushCopy } from "../utils/push-i18n.js";
 import {
-  getAllPushTokens,
-  getPushTokensForPartner,
+  getAllPushTokenEntries,
+  getPushTokenEntriesForPartner,
   removePushToken,
   upsertPushToken,
 } from "../services/push-token.store.js";
@@ -105,6 +106,7 @@ export async function registerPushToken(req, res) {
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
     const expoPushToken = String(req.body.expo_push_token || "").trim();
+    const language = String(req.body.language || "my").trim();
 
     if (!expoPushToken.startsWith("ExponentPushToken[")) {
       return error(res, "Invalid Expo push token", 400);
@@ -114,6 +116,7 @@ export async function registerPushToken(req, res) {
       partnerId: user.partner_id,
       uid: user.uid,
       expoPushToken,
+      language,
     });
 
     return success(res, { message: "Push token registered" });
@@ -144,21 +147,25 @@ export async function sendTestPush(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
-    const tokens = await getPushTokensForPartner(user.partner_id);
+    const tokenEntries = await getPushTokenEntriesForPartner(user.partner_id);
 
-    if (!tokens.length) {
+    if (!tokenEntries.length) {
       return error(res, "No Expo push token registered for this account", 400);
     }
 
     const result = await sendExpoPushMessages(
-      tokens.map((to) => ({
-        to,
-        sound: "default",
-        title: "QR Shop",
-        body: "Hello QR member, check out this product!",
-        channelId: "default",
-        data: { type: "test" },
-      }))
+      tokenEntries.map((entry) => {
+        const copy = getPushCopy(entry.language);
+
+        return {
+          to: entry.to,
+          sound: "default",
+          title: copy.productTitle,
+          body: copy.productBody(""),
+          channelId: "default",
+          data: { type: "test" },
+        };
+      })
     );
 
     return success(res, {
@@ -190,14 +197,14 @@ export async function webhookNewProduct(req, res) {
 
     productName = productName || product.name;
 
-    const tokens = await getAllPushTokens();
+    const tokenEntries = await getAllPushTokenEntries();
 
-    if (!tokens.length) {
+    if (!tokenEntries.length) {
       return success(res, { message: "No registered push tokens", sent: 0 });
     }
 
     const result = await sendExpoPushMessages(
-      buildProductPushMessages(tokens, {
+      buildProductPushMessages(tokenEntries, {
         id: productId,
         name: productName || "this product",
       })
@@ -205,7 +212,7 @@ export async function webhookNewProduct(req, res) {
 
     return success(res, {
       message: "Product push sent",
-      sent: tokens.length,
+      sent: tokenEntries.length,
       tickets: result.data,
     });
   } catch (err) {
@@ -244,19 +251,19 @@ export async function webhookNewCoupon(req, res) {
       return success(res, { message: "Coupon ignored: no partner", sent: 0 });
     }
 
-    const tokens = await getPushTokensForPartner(partnerId);
+    const tokenEntries = await getPushTokenEntriesForPartner(partnerId);
 
-    if (!tokens.length) {
+    if (!tokenEntries.length) {
       return success(res, { message: "No push token for this member", sent: 0 });
     }
 
     const result = await sendExpoPushMessages(
-      buildCouponPushMessages(tokens, { code: couponCode })
+      buildCouponPushMessages(tokenEntries, { code: couponCode })
     );
 
     return success(res, {
       message: "Coupon push sent",
-      sent: tokens.length,
+      sent: tokenEntries.length,
       tickets: result.data,
     });
   } catch (err) {
