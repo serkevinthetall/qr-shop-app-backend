@@ -12,7 +12,11 @@ const ADDRESS_FIELDS = [
   "state_id",
   "country_id",
   "parent_id",
+  "type",
+  "commercial_partner_id",
 ];
+
+const ADDRESS_TYPES = new Set(["delivery", "invoice", "other", "contact"]);
 
 function sortAddresses(addresses) {
   return [...addresses].sort((left, right) => {
@@ -25,6 +29,52 @@ function sortAddresses(addresses) {
 
     return left.id - right.id;
   });
+}
+
+function dedupeAddresses(addresses) {
+  const byId = new Map();
+
+  for (const address of addresses) {
+    if (!address?.id) {
+      continue;
+    }
+
+    byId.set(address.id, address);
+  }
+
+  return sortAddresses([...byId.values()]);
+}
+
+function hasAddressData(address) {
+  return Boolean(
+    String(address?.street || "").trim() ||
+      String(address?.street2 || "").trim() ||
+      String(address?.city || "").trim()
+  );
+}
+
+function buildChildOfDomain(partnerIds) {
+  const uniqueIds = [...new Set(partnerIds.filter(Boolean))];
+
+  if (!uniqueIds.length) {
+    return [["id", "=", 0]];
+  }
+
+  if (uniqueIds.length === 1) {
+    return [["id", "child_of", uniqueIds[0]]];
+  }
+
+  const domain = [];
+
+  for (let index = 0; index < uniqueIds.length; index += 1) {
+    if (index > 0) {
+      domain.push("|");
+    }
+
+    domain.push(["id", "child_of", uniqueIds[index]]);
+  }
+
+  return domain;
 }
 
 export async function getAccountPartnerIds(partnerId) {
@@ -61,7 +111,44 @@ async function searchPartnerAddresses(domain) {
     limit: 100,
   });
 
-  return sortAddresses(addresses);
+  return addresses;
+}
+
+function filterAccountAddresses(addresses, accountPartnerIds) {
+  const accountIds = new Set(accountPartnerIds);
+
+  return addresses.filter((address) => {
+    if (!address?.id) {
+      return false;
+    }
+
+    if (accountIds.has(address.id)) {
+      return true;
+    }
+
+    const parentId = Array.isArray(address.parent_id) ? address.parent_id[0] : 0;
+
+    if (parentId && accountIds.has(parentId)) {
+      return true;
+    }
+
+    const commercialId = Array.isArray(address.commercial_partner_id)
+      ? address.commercial_partner_id[0]
+      : 0;
+
+    if (!commercialId || !accountIds.has(commercialId)) {
+      return false;
+    }
+
+    if (!hasAddressData(address)) {
+      return false;
+    }
+
+    return (
+      Boolean(parentId) ||
+      ADDRESS_TYPES.has(String(address.type || "").toLowerCase())
+    );
+  });
 }
 
 async function searchSimplePartnerAddresses(partnerId) {
@@ -79,11 +166,20 @@ async function searchExpandedPartnerAddresses(partnerId) {
     return [];
   }
 
-  return searchPartnerAddresses([
-    "|",
-    ["id", "in", accountPartnerIds],
-    ["parent_id", "in", accountPartnerIds],
+  const [hierarchyAddresses, linkedAddresses] = await Promise.all([
+    searchPartnerAddresses(buildChildOfDomain(accountPartnerIds)),
+    searchPartnerAddresses([
+      ["commercial_partner_id", "in", accountPartnerIds],
+      "|",
+      ["street", "!=", false],
+      ["city", "!=", false],
+    ]),
   ]);
+
+  return filterAccountAddresses(
+    dedupeAddresses([...hierarchyAddresses, ...linkedAddresses]),
+    accountPartnerIds
+  );
 }
 
 export async function getAccountAddresses(partnerId) {
@@ -101,6 +197,18 @@ export async function getAccountAddresses(partnerId) {
   }
 }
 
+async function isAddressInAccountScope(addressId, partnerId) {
+  const normalizedAddressId = normalizePartnerId(addressId);
+  const normalizedPartnerId = normalizePartnerId(partnerId);
+
+  if (!normalizedAddressId || !normalizedPartnerId) {
+    return false;
+  }
+
+  const addresses = await getAccountAddresses(normalizedPartnerId);
+  return addresses.some((address) => address.id === normalizedAddressId);
+}
+
 export async function resolveShippingPartnerId(user, rawAddressId) {
   const partnerId = normalizePartnerId(user?.partner_id);
   const requestedId = normalizePartnerId(rawAddressId);
@@ -109,27 +217,9 @@ export async function resolveShippingPartnerId(user, rawAddressId) {
     return null;
   }
 
-  const accountPartnerIds = await getAccountPartnerIds(partnerId);
+  const allowed = await isAddressInAccountScope(requestedId, partnerId);
 
-  if (accountPartnerIds.includes(requestedId)) {
-    return requestedId;
-  }
-
-  const childAddresses = await odooCall("res.partner", "search_read", {
-    domain: [
-      ["id", "=", requestedId],
-      ["parent_id", "in", accountPartnerIds],
-      ["active", "=", true],
-    ],
-    fields: ["id"],
-    limit: 1,
-  });
-
-  if (!childAddresses.length) {
-    return null;
-  }
-
-  return requestedId;
+  return allowed ? requestedId : null;
 }
 
 export async function isManagedChildAddress(addressId, partnerId) {
@@ -140,17 +230,9 @@ export async function isManagedChildAddress(addressId, partnerId) {
     return false;
   }
 
-  const accountPartnerIds = await getAccountPartnerIds(normalizedPartnerId);
+  if (normalizedAddressId === normalizedPartnerId) {
+    return false;
+  }
 
-  const addresses = await odooCall("res.partner", "search_read", {
-    domain: [
-      ["id", "=", normalizedAddressId],
-      ["parent_id", "in", accountPartnerIds],
-      ["active", "=", true],
-    ],
-    fields: ["id"],
-    limit: 1,
-  });
-
-  return addresses.length > 0;
+  return isAddressInAccountScope(normalizedAddressId, normalizedPartnerId);
 }
