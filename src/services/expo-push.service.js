@@ -54,19 +54,22 @@ export async function sendExpoPushMessages(messages) {
 }
 
 export function buildProductPushMessages(entries, product) {
+  const ribbonName = String(product.ribbon_name || "").trim();
+
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
     return {
       to,
       sound: "default",
-      title: copy.productTitle,
+      title: ribbonName || copy.productTitleFallback,
       body: copy.productBody(product.name),
       channelId: ANDROID_CHANNEL_ID,
       data: {
         type: "product",
         productId: product.id,
         productName: product.name || "",
+        ribbonName,
       },
     };
   });

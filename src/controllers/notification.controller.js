@@ -15,7 +15,9 @@ import {
 } from "../services/push-token.store.js";
 import {
   getAppProductDomain,
-  isNewRibbonProduct,
+  getNotifiableRibbonOdooDomain,
+  getProductRibbonName,
+  isNotifiableRibbonProduct,
 } from "../utils/product-filters.js";
 
 const NEW_PRODUCT_LIMIT = 20;
@@ -160,7 +162,7 @@ export async function sendTestPush(req, res) {
         return {
           to: entry.to,
           sound: "default",
-          title: copy.productTitle,
+          title: copy.productTitleFallback,
           body: copy.productBody(""),
           channelId: "default",
           data: { type: "test" },
@@ -188,14 +190,16 @@ export async function webhookNewProduct(req, res) {
 
     const product = await loadAppProduct(productId);
 
-    if (!product || !isNewRibbonProduct(product)) {
+    if (!product || !isNotifiableRibbonProduct(product)) {
       return success(res, {
-        message: "Product ignored (must be app-tagged, published, and ribbon New)",
+        message:
+          "Product ignored (must be app-tagged, published, and have a notifiable ribbon)",
         sent: 0,
       });
     }
 
     productName = productName || product.name;
+    const ribbonName = getProductRibbonName(product);
 
     const tokenEntries = await getAllPushTokenEntries();
 
@@ -207,6 +211,7 @@ export async function webhookNewProduct(req, res) {
       buildProductPushMessages(tokenEntries, {
         id: productId,
         name: productName || "this product",
+        ribbon_name: ribbonName,
       })
     );
 
@@ -279,25 +284,30 @@ export async function getNotifications(req, res) {
 
     const notifications = [];
 
-    // New-product notifications: app-tagged, published, sellable, ribbon = New.
+    // Product notifications: any notifiable ribbon (not Sold out / Out of stock).
     const products = await odooCall("product.template", "search_read", {
       domain: [
         ...getAppProductDomain(),
-        ["website_ribbon_id.name", "ilike", "new"],
-        ["create_date", ">=", getStartOfTodayUtc()],
+        ...getNotifiableRibbonOdooDomain(),
+        ["write_date", ">=", getStartOfTodayUtc()],
       ],
-      fields: ["id", "name", "create_date"],
-      order: "create_date desc",
+      fields: ["id", "name", "write_date", "website_ribbon_id"],
+      order: "write_date desc",
       limit: NEW_PRODUCT_LIMIT,
     });
 
     for (const product of products) {
+      if (!isNotifiableRibbonProduct(product)) {
+        continue;
+      }
+
       notifications.push({
         id: `product-${product.id}`,
         type: "product",
         product_id: product.id,
         product_name: product.name,
-        date: product.create_date,
+        ribbon_name: getProductRibbonName(product),
+        date: product.write_date,
       });
     }
 

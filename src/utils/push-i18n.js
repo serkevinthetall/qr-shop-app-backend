@@ -1,15 +1,15 @@
 const COPY = {
   en: {
-    productTitle: "New product",
+    productTitleFallback: "Product update",
     productBody: (name) =>
-      `Hello QR member, check out ${name || "this new product"}.`,
+      `${name || "This product"} — tap to view this product.`,
     couponTitle: "New coupon for you",
     couponBody: (code) => `A new coupon ${code || ""} is ready for you.`.trim(),
   },
   my: {
-    productTitle: "ပစ္စည်းအသစ်",
+    productTitleFallback: "ပစ္စည်းအပ်ဒိတ်",
     productBody: (name) =>
-      `${name || "ဤပစ္စည်းအသစ်"} — မင်္ဂလာပါ QR အဖွဲ့ဝင်၊ ဤပစ္စည်းအသစ်ကို ကြည့်ရှုပါ။`,
+      `${name || "ဤပစ္စည်း"} — ဤပစ္စည်းကို ကြည့်ရှုရန် နှိပ်ပါ။`,
     couponTitle: "သင့်အတွက် ကူပွန်အသစ်",
     couponBody: (code) => `ကူပွန်အသစ် ${code || ""} အသင့်ဖြစ်ပါပြီ။`.trim(),
   },

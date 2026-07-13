@@ -32,6 +32,34 @@ export function getAppProductDomain(extra = []) {
   ];
 }
 
+const BLOCKED_RIBBON_SUBSTRINGS = ["sold out", "out of stock"];
+
+export function getProductRibbonName(product) {
+  const ribbon = product?.website_ribbon_id;
+
+  if (!Array.isArray(ribbon) || !ribbon[1]) {
+    return "";
+  }
+
+  return String(ribbon[1]).trim();
+}
+
+export function isBlockedRibbonName(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+
+  if (!normalized) {
+    return true;
+  }
+
+  return BLOCKED_RIBBON_SUBSTRINGS.some((blocked) => normalized.includes(blocked));
+}
+
+/** Any manual ribbon except Sold out / Out of stock (and empty). */
+export function isNotifiableRibbonProduct(product) {
+  const ribbonName = getProductRibbonName(product);
+  return ribbonName.length > 0 && !isBlockedRibbonName(ribbonName);
+}
+
 export function isNewRibbonName(name) {
   return String(name || "")
     .trim()
@@ -40,13 +68,15 @@ export function isNewRibbonName(name) {
 }
 
 export function isNewRibbonProduct(product) {
-  const ribbon = product?.website_ribbon_id;
+  return isNotifiableRibbonProduct(product) && isNewRibbonName(getProductRibbonName(product));
+}
 
-  if (!Array.isArray(ribbon) || !ribbon[1]) {
-    return false;
-  }
-
-  return isNewRibbonName(ribbon[1]);
+export function getNotifiableRibbonOdooDomain() {
+  return [
+    ["website_ribbon_id", "!=", false],
+    ["website_ribbon_id.name", "not ilike", "sold out"],
+    ["website_ribbon_id.name", "not ilike", "out of stock"],
+  ];
 }
 
 export function getImageVersion(writeDate) {
