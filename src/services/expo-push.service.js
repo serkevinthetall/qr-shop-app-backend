@@ -62,7 +62,7 @@ export function buildProductPushMessages(entries, product) {
     return {
       to,
       sound: "default",
-      title: ribbonName || copy.productTitleFallback,
+      title: copy.productTitle(ribbonName),
       body: copy.productBody(product.name),
       channelId: ANDROID_CHANNEL_ID,
       data: {

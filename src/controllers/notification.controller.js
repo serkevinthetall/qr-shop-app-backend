@@ -162,7 +162,7 @@ export async function sendTestPush(req, res) {
         return {
           to: entry.to,
           sound: "default",
-          title: copy.productTitleFallback,
+          title: copy.productTitle(""),
           body: copy.productBody(""),
           channelId: "default",
           data: { type: "test" },
