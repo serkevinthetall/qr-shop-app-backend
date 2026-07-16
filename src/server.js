@@ -40,8 +40,13 @@ app.use((req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 10000;
+export default app;
 
-app.listen(PORT, () => {
-  console.log(`QR Shop API running on port ${PORT}`);
-});
+// Local / traditional hosting only — Vercel invokes the exported app.
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 10000;
+
+  app.listen(PORT, () => {
+    console.log(`QR Shop API running on port ${PORT}`);
+  });
+}

@@ -9,12 +9,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STORE_PATH = path.join(__dirname, "../../data/push-tokens.json");
 const PARTNER_FIELD =
   process.env.PUSH_TOKEN_PARTNER_FIELD || "x_studio_expo_push_token";
+// Vercel filesystem is ephemeral/read-only — Odoo is the source of truth there.
+const FILE_STORE_ENABLED = !process.env.VERCEL;
 
 function isValidExpoToken(token) {
   return String(token || "").trim().startsWith("ExponentPushToken[");
 }
 
 async function readFileStore() {
+  if (!FILE_STORE_ENABLED) {
+    return { tokens: [] };
+  }
+
   try {
     const raw = await fs.readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw);
@@ -34,6 +40,10 @@ async function readFileStore() {
 }
 
 async function writeFileStore(store) {
+  if (!FILE_STORE_ENABLED) {
+    return;
+  }
+
   await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
   await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
 }
