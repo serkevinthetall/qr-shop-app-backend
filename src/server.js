@@ -9,7 +9,6 @@ import membershipRoutes from "./routes/membership.routes.js";
 import orderRoutes from "./routes/order.routes.js";
 import addressRoutes from "./routes/address.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
-import appApiRoutes from "./app/routes/index.js";
 
 dotenv.config();
 
@@ -22,11 +21,10 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "QR Shop API is running",
-    modules: ["auth", "customer", "product", "membership", "app"],
+    modules: ["auth", "customer", "product", "membership"],
   });
 });
 
-// Customer shop (website + customer Android) — do not mix with POS.
 app.use("/api/auth", authRoutes);
 app.use("/api/customer", customerRoutes);
 app.use("/api", productRoutes);
@@ -34,9 +32,6 @@ app.use("/api/membership", membershipRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/notifications", notificationRoutes);
-
-// Sales-rep POS app only.
-app.use("/app/api", appApiRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
