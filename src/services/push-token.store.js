@@ -150,6 +150,13 @@ export async function upsertPushToken({ partnerId, uid, expoPushToken, language 
   try {
     await writeOdooToken(partnerId, expoPushToken);
   } catch (err) {
+    // On Vercel the local file store is disabled, so Odoo is the only place
+    // tokens survive. Failing silently here made registration look successful
+    // while background pushes had nothing to send to.
+    if (!FILE_STORE_ENABLED) {
+      throw err;
+    }
+
     console.warn(
       "Odoo push token write failed; using local file store only:",
       err.message

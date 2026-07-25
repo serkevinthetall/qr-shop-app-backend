@@ -53,13 +53,22 @@ export async function sendExpoPushMessages(messages) {
   return { data: results };
 }
 
+function withAndroidDeliveryDefaults(message) {
+  return {
+    ...message,
+    // High priority reduces Doze delays on Android production devices.
+    priority: "high",
+    channelId: message.channelId || ANDROID_CHANNEL_ID,
+  };
+}
+
 export function buildProductPushMessages(entries, product) {
   const ribbonName = String(product.ribbon_name || "").trim();
 
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
-    return {
+    return withAndroidDeliveryDefaults({
       to,
       sound: "default",
       title: copy.productTitle(ribbonName),
@@ -71,7 +80,7 @@ export function buildProductPushMessages(entries, product) {
         productName: product.name || "",
         ribbonName,
       },
-    };
+    });
   });
 }
 
@@ -79,7 +88,7 @@ export function buildCouponPushMessages(entries, coupon) {
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
-    return {
+    return withAndroidDeliveryDefaults({
       to,
       sound: "default",
       title: copy.couponTitle,
@@ -89,6 +98,6 @@ export function buildCouponPushMessages(entries, coupon) {
         type: "coupon",
         couponCode: coupon.code || "",
       },
-    };
+    });
   });
 }

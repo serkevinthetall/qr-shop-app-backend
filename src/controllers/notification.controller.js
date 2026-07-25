@@ -165,6 +165,7 @@ export async function sendTestPush(req, res) {
           title: copy.productTitle(""),
           body: copy.productBody(""),
           channelId: "default",
+          priority: "high",
           data: { type: "test" },
         };
       })
