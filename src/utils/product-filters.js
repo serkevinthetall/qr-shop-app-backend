@@ -7,6 +7,7 @@ export const APP_PRODUCT_LIST_FIELDS = [
   "compare_list_price",
   "categ_id",
   "public_categ_ids",
+  "product_tag_ids",
   "product_variant_id",
   "write_date",
   "website_ribbon_id",

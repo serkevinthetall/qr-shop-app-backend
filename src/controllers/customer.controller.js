@@ -1,6 +1,7 @@
 import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
+import { getPartnerTagNames } from "../utils/partner-tags.js";
 import { normalizePhone } from "../utils/phone.js";
 
 export async function getProfile(req, res) {
@@ -28,12 +29,21 @@ export async function getProfile(req, res) {
         "zip",
         "state_id",
         "country_id",
+        "category_id",
       ],
       limit: 1,
     });
 
+    const partner = partners[0] || null;
+    const tags = partner ? await getPartnerTagNames(user.partner_id) : [];
+
     return success(res, {
-      profile: partners[0] || null,
+      profile: partner
+        ? {
+            ...partner,
+            tags,
+          }
+        : null,
     });
   } catch (err) {
     return error(res, "Failed to get profile", 500, err.message);

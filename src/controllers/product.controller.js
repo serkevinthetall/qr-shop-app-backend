@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import {
   APP_PRODUCT_FIELDS,
@@ -6,6 +7,10 @@ import {
   getAppProductDomain,
   getImageUrl,
 } from "../utils/product-filters.js";
+import {
+  attachProductTagNames,
+  getPartnerTagNames,
+} from "../utils/partner-tags.js";
 import {
   resolveProductRibbonFast,
   resolveProductRibbons,
@@ -18,6 +23,38 @@ const CATEGORIES_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function getOdooBaseUrl() {
   return String(process.env.ODOO_URL || "").trim().replace(/\/$/, "");
+}
+
+function wantsJustForYou(req) {
+  const raw = String(req.query.just_for_you || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+async function applyJustForYouDomain(req, domain) {
+  if (!wantsJustForYou(req)) {
+    return { ok: true, domain };
+  }
+
+  const user = getAuthUser(req);
+
+  if (!user) {
+    return { ok: false, status: 401, message: "Unauthorized" };
+  }
+
+  if (!user.partner_id) {
+    return { ok: false, status: 400, message: "No partner linked to this user" };
+  }
+
+  const partnerTags = await getPartnerTagNames(user.partner_id);
+
+  if (!partnerTags.length) {
+    return { ok: true, domain: null, empty: true };
+  }
+
+  return {
+    ok: true,
+    domain: [...domain, ["product_tag_ids.name", "in", partnerTags]],
+  };
 }
 
 function formatProduct(product, ribbon = null) {
@@ -35,6 +72,7 @@ function formatProduct(product, ribbon = null) {
     public_categ_ids: Array.isArray(product.public_categ_ids)
       ? product.public_categ_ids
       : [],
+    tags: Array.isArray(product.tags) ? product.tags : [],
     uom_id: product.uom_id || false,
     product_variant_id: product.product_variant_id || false,
     write_date: writeDate,
@@ -44,11 +82,14 @@ function formatProduct(product, ribbon = null) {
 }
 
 async function formatProducts(products, { fastRibbons = false } = {}) {
-  const ribbons = fastRibbons
-    ? await resolveProductRibbonsForList(odooCall, products)
-    : await resolveProductRibbons(odooCall, products);
+  const [withTags, ribbons] = await Promise.all([
+    attachProductTagNames(products),
+    fastRibbons
+      ? resolveProductRibbonsForList(odooCall, products)
+      : resolveProductRibbons(odooCall, products),
+  ]);
 
-  return products.map((product, index) => formatProduct(product, ribbons[index]));
+  return withTags.map((product, index) => formatProduct(product, ribbons[index]));
 }
 
 function formatSimilarProduct(product) {
@@ -127,11 +168,28 @@ export async function getProducts(req, res) {
     const offset = Number(req.query.offset || 0);
     const categoryId = Number(req.query.category_id || 0);
 
-    const domain = getAppProductDomain();
+    let domain = getAppProductDomain();
 
     if (categoryId) {
       domain.push(["public_categ_ids", "in", [categoryId]]);
     }
+
+    const justForYou = await applyJustForYouDomain(req, domain);
+
+    if (!justForYou.ok) {
+      return error(res, justForYou.message, justForYou.status);
+    }
+
+    if (justForYou.empty) {
+      return success(res, {
+        products: [],
+        limit,
+        offset,
+        count: 0,
+      });
+    }
+
+    domain = justForYou.domain;
 
     const products = await odooCall("product.template", "search_read", {
       domain,
@@ -198,15 +256,16 @@ export async function getProductById(req, res) {
           })
         : Promise.resolve([]);
 
-    const [ribbon, similarProductsResult] = await Promise.all([
+    const [ribbon, similarProductsResult, withTags] = await Promise.all([
       resolveProductRibbonFast(odooCall, product),
       similarPromise,
+      attachProductTagNames([product]),
     ]);
 
     similarProducts = similarProductsResult;
 
     return success(res, {
-      product: formatProduct(product, ribbon),
+      product: formatProduct(withTags[0] || product, ribbon),
       similar_products: similarProducts.map((similarProduct) => formatSimilarProduct(similarProduct)),
     });
   } catch (err) {
@@ -223,11 +282,26 @@ export async function searchProducts(req, res) {
       return error(res, "Search query is required", 400);
     }
 
-    const domain = getAppProductDomain([["name", "ilike", q]]);
+    let domain = getAppProductDomain([["name", "ilike", q]]);
 
     if (categoryId) {
       domain.push(["public_categ_ids", "in", [categoryId]]);
     }
+
+    const justForYou = await applyJustForYouDomain(req, domain);
+
+    if (!justForYou.ok) {
+      return error(res, justForYou.message, justForYou.status);
+    }
+
+    if (justForYou.empty) {
+      return success(res, {
+        products: [],
+        count: 0,
+      });
+    }
+
+    domain = justForYou.domain;
 
     const products = await odooCall("product.template", "search_read", {
       domain,
