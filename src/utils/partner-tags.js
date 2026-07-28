@@ -81,6 +81,42 @@ export async function resolveProductTagNamesByIds(tagIds) {
   return new Map(tags.map((tag) => [tag.id, normalizeTagName(tag.name)]));
 }
 
+/**
+ * Resolve product.tag IDs by name (case-insensitive).
+ * Prefer IDs in domains — do NOT add another product_tag_ids.name leaf next to
+ * the existing "QR App" gate, or Odoo ANDs both name checks on the same join
+ * and Just-for-you always returns empty.
+ */
+export async function resolveProductTagIdsByNames(names) {
+  const wanted = toPersonalizationTagNames(names);
+
+  if (!wanted.length) {
+    return [];
+  }
+
+  // =ilike without % is case-insensitive equality in Odoo.
+  const nameDomain =
+    wanted.length === 1
+      ? [["name", "=ilike", wanted[0]]]
+      : [
+          ...Array.from({ length: wanted.length - 1 }, () => "|"),
+          ...wanted.map((name) => ["name", "=ilike", name]),
+        ];
+
+  const tags = await odooCall("product.tag", "search_read", {
+    domain: nameDomain,
+    fields: ["id", "name"],
+    limit: wanted.length * 3,
+  });
+
+  const wantedSet = new Set(wanted.map((name) => name.toLowerCase()));
+
+  return tags
+    .filter((tag) => wantedSet.has(normalizeTagName(tag.name).toLowerCase()))
+    .map((tag) => tag.id)
+    .filter((id) => typeof id === "number" && id > 0);
+}
+
 export async function attachProductTagNames(products) {
   const allIds = products.flatMap((product) =>
     Array.isArray(product.product_tag_ids) ? product.product_tag_ids : []

@@ -10,6 +10,7 @@ import {
 import {
   attachProductTagNames,
   getPartnerTagNames,
+  resolveProductTagIdsByNames,
 } from "../utils/partner-tags.js";
 import {
   resolveProductRibbonFast,
@@ -51,9 +52,16 @@ async function applyJustForYouDomain(req, domain) {
     return { ok: true, domain: null, empty: true };
   }
 
+  // Use tag IDs (not another .name leaf) so this AND the "QR App" gate both work.
+  const productTagIds = await resolveProductTagIdsByNames(partnerTags);
+
+  if (!productTagIds.length) {
+    return { ok: true, domain: null, empty: true };
+  }
+
   return {
     ok: true,
-    domain: [...domain, ["product_tag_ids.name", "in", partnerTags]],
+    domain: [...domain, ["product_tag_ids", "in", productTagIds]],
   };
 }
 
