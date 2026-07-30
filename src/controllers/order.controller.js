@@ -3,11 +3,15 @@ import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { resolveShippingPartnerId } from "../utils/partner-scope.js";
 import { normalizePartnerId } from "../utils/partner-id.js";
+import {
+  getPricelistPricesForProducts,
+  resolvePricelistForPartner,
+} from "../utils/membership-pricelist.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
     domain: [["id", "=", productTemplateId]],
-    fields: ["id", "list_price"],
+    fields: ["id", "list_price", "product_variant_id"],
     limit: 1,
   });
 
@@ -25,6 +29,7 @@ async function getProductVariant(productTemplateId) {
 
   return {
     ...variant,
+    product_variant_id: templates[0]?.product_variant_id || [variant.id, variant.name],
     list_price: templates[0]?.list_price ?? variant.lst_price,
   };
 }
@@ -341,6 +346,8 @@ export async function createCheckout(req, res) {
 
     const orderLines = [];
     let cartSubtotal = 0;
+    const { pricelistId } = await resolvePricelistForPartner(partnerId);
+    const resolvedVariants = [];
 
     for (const item of items) {
       const templateId = Number(item.product_id);
@@ -356,8 +363,28 @@ export async function createCheckout(req, res) {
         return error(res, `Product variant not found for product.template ID ${templateId}`, 400);
       }
 
-      cartSubtotal +=
-        (Number(variant.list_price) || Number(variant.lst_price) || 0) * quantity;
+      resolvedVariants.push({ templateId, quantity, variant });
+    }
+
+    const priceByTemplate = pricelistId
+      ? await getPricelistPricesForProducts(
+          pricelistId,
+          resolvedVariants.map(({ templateId, variant }) => ({
+            id: templateId,
+            product_variant_id: variant.product_variant_id || variant.id,
+          })),
+          partnerId
+        )
+      : new Map();
+
+    for (const { templateId, quantity, variant } of resolvedVariants) {
+      const unitPrice =
+        priceByTemplate.get(templateId) ??
+        Number(variant.list_price) ??
+        Number(variant.lst_price) ??
+        0;
+
+      cartSubtotal += unitPrice * quantity;
 
       orderLines.push([
         0,
@@ -365,6 +392,7 @@ export async function createCheckout(req, res) {
         {
           product_id: variant.id,
           product_uom_qty: quantity,
+          ...(pricelistId ? { price_unit: unitPrice } : {}),
         },
       ]);
     }
@@ -417,6 +445,10 @@ export async function createCheckout(req, res) {
 
       order_line: orderLines,
     };
+
+    if (pricelistId) {
+      orderVals.pricelist_id = pricelistId;
+    }
 
     // Only the customer's own note is written to the order note. The
     // payment/coupon/delivery summary is intentionally not duplicated here — it

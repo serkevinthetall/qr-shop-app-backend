@@ -17,6 +17,7 @@ import {
   resolveProductRibbons,
   resolveProductRibbonsForList,
 } from "../utils/product-ribbon.js";
+import { applyMembershipPricesToProducts } from "../utils/membership-pricelist.js";
 
 let categoriesCache = null;
 let categoriesCacheTime = 0;
@@ -89,7 +90,7 @@ function formatProduct(product, ribbon = null) {
   };
 }
 
-async function formatProducts(products, { fastRibbons = false } = {}) {
+async function formatProducts(products, { fastRibbons = false, partnerId = null } = {}) {
   const [withTags, ribbons] = await Promise.all([
     attachProductTagNames(products),
     fastRibbons
@@ -97,7 +98,14 @@ async function formatProducts(products, { fastRibbons = false } = {}) {
       : resolveProductRibbons(odooCall, products),
   ]);
 
-  return withTags.map((product, index) => formatProduct(product, ribbons[index]));
+  const priced = await applyMembershipPricesToProducts(withTags, partnerId);
+
+  return priced.map((product, index) => formatProduct(product, ribbons[index]));
+}
+
+function getRequestPartnerId(req) {
+  const user = getAuthUser(req);
+  return user?.partner_id || null;
 }
 
 function formatSimilarProduct(product) {
@@ -208,7 +216,10 @@ export async function getProducts(req, res) {
     });
 
     return success(res, {
-      products: await formatProducts(products, { fastRibbons: true }),
+      products: await formatProducts(products, {
+        fastRibbons: true,
+        partnerId: getRequestPartnerId(req),
+      }),
       limit,
       offset,
       count: products.length,
@@ -272,9 +283,21 @@ export async function getProductById(req, res) {
 
     similarProducts = similarProductsResult;
 
+    const partnerId = getRequestPartnerId(req);
+    const [pricedMain] = await applyMembershipPricesToProducts(
+      [withTags[0] || product],
+      partnerId
+    );
+    const pricedSimilar = await applyMembershipPricesToProducts(
+      similarProducts,
+      partnerId
+    );
+
     return success(res, {
-      product: formatProduct(withTags[0] || product, ribbon),
-      similar_products: similarProducts.map((similarProduct) => formatSimilarProduct(similarProduct)),
+      product: formatProduct(pricedMain || withTags[0] || product, ribbon),
+      similar_products: pricedSimilar.map((similarProduct) =>
+        formatSimilarProduct(similarProduct)
+      ),
     });
   } catch (err) {
     return error(res, "Failed to get product", 500, getOdooError(err));
@@ -319,7 +342,10 @@ export async function searchProducts(req, res) {
     });
 
     return success(res, {
-      products: await formatProducts(products, { fastRibbons: true }),
+      products: await formatProducts(products, {
+        fastRibbons: true,
+        partnerId: getRequestPartnerId(req),
+      }),
       count: products.length,
     });
   } catch (err) {
