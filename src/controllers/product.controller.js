@@ -17,10 +17,7 @@ import {
   resolveProductRibbons,
   resolveProductRibbonsForList,
 } from "../utils/product-ribbon.js";
-import {
-  applyMembershipPricesToProducts,
-  resolvePricelistForPartner,
-} from "../utils/membership-pricelist.js";
+import { applyMembershipPricesToProducts } from "../utils/membership-pricelist.js";
 
 let categoriesCache = null;
 let categoriesCacheTime = 0;
@@ -455,61 +452,3 @@ export async function getCategories(req, res) {
   }
 }
 
-/** Temporary diagnostic for membership pricelist pricing. Remove after fix verified. */
-export async function debugPricelist(req, res) {
-  try {
-    const productId = Number(req.query.product_id) || 403;
-    const partnerId = getRequestPartnerId(req);
-    const { getPricelistPricesForProducts } = await import(
-      "../utils/membership-pricelist.js"
-    );
-
-    const products = await odooCall("product.template", "search_read", {
-      domain: [["id", "=", productId]],
-      fields: ["id", "name", "list_price", "product_variant_id", "categ_id"],
-      limit: 1,
-    });
-
-    const product = products[0] || null;
-    const resolved = await resolvePricelistForPartner(partnerId);
-    const [priced] = product
-      ? await applyMembershipPricesToProducts([product], partnerId)
-      : [null];
-
-    const byTier = {};
-
-    for (const [tier, name] of [
-      ["default", "Default"],
-      ["premium", "Premium Membership"],
-      ["pro", "Pro Membership"],
-    ]) {
-      const lists = await odooCall("product.pricelist", "search_read", {
-        domain: [["name", "=", name]],
-        fields: ["id", "name"],
-        limit: 1,
-      });
-      const listId = lists[0]?.id;
-
-      if (!listId || !product) {
-        byTier[tier] = null;
-        continue;
-      }
-
-      const map = await getPricelistPricesForProducts(listId, [product], partnerId);
-      byTier[tier] = {
-        pricelistId: listId,
-        price: map.get(product.id) ?? null,
-      };
-    }
-
-    return success(res, {
-      partnerId,
-      product,
-      resolved,
-      priced_list_price: priced?.list_price ?? null,
-      byTier,
-    });
-  } catch (err) {
-    return error(res, "Pricelist debug failed", 500, getOdooError(err));
-  }
-}
