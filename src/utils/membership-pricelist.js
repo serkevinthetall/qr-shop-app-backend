@@ -1,6 +1,7 @@
 import { odooCall } from "../services/odoo.service.js";
 
 const PRICELIST_CACHE_TTL_MS = 5 * 60 * 1000;
+const PRICELIST_ITEMS_CACHE_TTL_MS = 2 * 60 * 1000;
 
 /** Map membership level labels to Odoo pricelist names. */
 const MEMBERSHIP_PRICELIST_NAMES = {
@@ -10,6 +11,7 @@ const MEMBERSHIP_PRICELIST_NAMES = {
 
 let pricelistIdByName = null;
 let pricelistCacheTime = 0;
+const pricelistItemsCache = new Map();
 
 function membershipLevelLabel(level) {
   if (Array.isArray(level)) {
@@ -46,6 +48,28 @@ function getVariantId(product) {
 
   if (typeof variant === "number" && variant > 0) {
     return variant;
+  }
+
+  return null;
+}
+
+function getTemplateId(product) {
+  if (typeof product?.id === "number" && product.id > 0) {
+    return product.id;
+  }
+
+  return null;
+}
+
+function getCategoryId(product) {
+  const categ = product?.categ_id;
+
+  if (Array.isArray(categ) && typeof categ[0] === "number") {
+    return categ[0];
+  }
+
+  if (typeof categ === "number" && categ > 0) {
+    return categ;
   }
 
   return null;
@@ -124,7 +148,6 @@ async function getActiveMembershipLevel(partnerId) {
 /**
  * Resolve the Odoo pricelist for a partner from active membership.
  * Premium → Premium Membership, Pro → Pro Membership, else Default.
- * Guests (no partner) also get Default so catalog prices are not stuck at list_price 0.
  */
 export async function resolvePricelistForPartner(partnerId) {
   const idsByName = await loadPricelistIdsByName();
@@ -178,172 +201,233 @@ export async function resolvePricelistForPartner(partnerId) {
   };
 }
 
-/**
- * Preferred path: product.product `price` with pricelist in context.
- * Works across Odoo 14–18 without relying on shifting method signatures.
- */
-async function getPricesViaProductContext(pricelistId, products, partnerId) {
-  const prices = new Map();
-  const pairs = [];
+function computePriceFromItem(item, listPrice) {
+  const compute = String(item.compute_price || "");
 
-  for (const product of products) {
-    const variantId = getVariantId(product);
-    if (variantId) {
-      pairs.push({ templateId: product.id, variantId });
-    }
+  if (compute === "fixed") {
+    const value = Number(item.fixed_price);
+    return Number.isFinite(value) ? value : null;
   }
 
-  if (!pairs.length) {
-    return prices;
+  const base = Number(listPrice) || 0;
+
+  if (compute === "percentage") {
+    const percent = Number(item.percent_price) || 0;
+    return base * (1 - percent / 100);
   }
 
-  const variantIds = [...new Set(pairs.map((pair) => pair.variantId))];
-  const rows = await odooCall("product.product", "read", {
-    args: [variantIds, ["id", "price", "lst_price"]],
-    kwargs: {
-      context: {
-        pricelist: pricelistId,
-        partner: partnerId || false,
-      },
-    },
-  });
+  // formula
+  const discount = Number(item.price_discount) || 0;
+  const surcharge = Number(item.price_surcharge) || 0;
+  return base * (1 - discount / 100) + surcharge;
+}
 
-  const byVariant = new Map();
+function itemSpecificity(item, product) {
+  const variantId = getVariantId(product);
+  const templateId = getTemplateId(product);
+  const categoryId = getCategoryId(product);
+  const appliedOn = String(item.applied_on || "");
 
-  for (const row of rows || []) {
-    const value = Number(row.price);
-    if (Number.isFinite(value)) {
-      byVariant.set(row.id, value);
+  const itemProductId = Array.isArray(item.product_id)
+    ? item.product_id[0]
+    : item.product_id;
+  const itemTemplateId = Array.isArray(item.product_tmpl_id)
+    ? item.product_tmpl_id[0]
+    : item.product_tmpl_id;
+  const itemCategId = Array.isArray(item.categ_id)
+    ? item.categ_id[0]
+    : item.categ_id;
+
+  if (
+    (appliedOn === "0_product_variant" || itemProductId) &&
+    variantId &&
+    itemProductId === variantId
+  ) {
+    return 400;
+  }
+
+  if (
+    (appliedOn === "1_product" || itemTemplateId) &&
+    templateId &&
+    itemTemplateId === templateId
+  ) {
+    return 300;
+  }
+
+  if (
+    (appliedOn === "2_product_category" || itemCategId) &&
+    categoryId &&
+    itemCategId === categoryId
+  ) {
+    return 200;
+  }
+
+  if (appliedOn === "3_global") {
+    return 100;
+  }
+
+  return 0;
+}
+
+function resolvePriceFromItems(items, product, quantity = 1) {
+  let best = null;
+
+  for (const item of items) {
+    const minQty = Number(item.min_quantity) || 0;
+    if (minQty > quantity) {
       continue;
     }
 
-    const fallback = Number(row.lst_price);
-    if (Number.isFinite(fallback)) {
-      byVariant.set(row.id, fallback);
+    const score = itemSpecificity(item, product);
+    if (score <= 0) {
+      continue;
+    }
+
+    const price = computePriceFromItem(item, product.list_price);
+    if (price == null || !Number.isFinite(price)) {
+      continue;
+    }
+
+    const candidate = {
+      score,
+      minQty,
+      id: item.id || 0,
+      price,
+    };
+
+    if (
+      !best ||
+      candidate.score > best.score ||
+      (candidate.score === best.score && candidate.minQty > best.minQty) ||
+      (candidate.score === best.score &&
+        candidate.minQty === best.minQty &&
+        candidate.id > best.id)
+    ) {
+      best = candidate;
     }
   }
 
-  for (const { templateId, variantId } of pairs) {
-    if (byVariant.has(variantId)) {
-      prices.set(templateId, byVariant.get(variantId));
-    }
-  }
-
-  return prices;
+  return best?.price ?? null;
 }
 
-async function getPricesViaComputePriceRule(pricelistId, products) {
-  const prices = new Map();
-  const pairs = [];
+async function loadPricelistItems(pricelistId, products) {
+  const cacheKey = String(pricelistId);
+  const cached = pricelistItemsCache.get(cacheKey);
+  const now = Date.now();
 
-  for (const product of products) {
-    const variantId = getVariantId(product);
-    if (variantId) {
-      pairs.push({ templateId: product.id, variantId });
-    }
+  if (cached && now - cached.time < PRICELIST_ITEMS_CACHE_TTL_MS) {
+    return cached.items;
   }
 
-  if (!pairs.length) {
-    return prices;
-  }
-
-  const variantIds = [...new Set(pairs.map((pair) => pair.variantId))];
-
-  // Odoo 16+: (products, quantity, currency=None, ...)
-  // Older: (products, qty, partner, ...) — quantity=1.0 is safe either way.
-  const result = await odooCall("product.pricelist", "_compute_price_rule", {
-    args: [[pricelistId], variantIds, 1.0],
-  });
-
-  if (!result || typeof result !== "object") {
-    return prices;
-  }
-
-  for (const { templateId, variantId } of pairs) {
-    const entry = result[variantId] ?? result[String(variantId)];
-    const value = Array.isArray(entry) ? Number(entry[0]) : Number(entry);
-
-    if (Number.isFinite(value)) {
-      prices.set(templateId, value);
-    }
-  }
-
-  return prices;
-}
-
-async function getSingleProductPrice(pricelistId, productId) {
-  // Do not pass partner as a 4th positional arg — on Odoo 16+ that becomes `currency`.
-  const attempts = [
-    {
-      method: "_get_product_price",
-      params: { args: [[pricelistId], productId, 1.0] },
-    },
-    {
-      method: "get_product_price",
-      params: { args: [[pricelistId], productId, 1.0] },
-    },
+  const templateIds = [
+    ...new Set(products.map(getTemplateId).filter((id) => typeof id === "number")),
+  ];
+  const variantIds = [
+    ...new Set(products.map(getVariantId).filter((id) => typeof id === "number")),
   ];
 
-  for (const attempt of attempts) {
-    try {
-      const price = await odooCall("product.pricelist", attempt.method, attempt.params);
-      const value = Number(price);
-      if (Number.isFinite(value)) {
-        return value;
-      }
-    } catch {
-      // try next shape
-    }
-  }
+  const domain = [
+    ["pricelist_id", "=", pricelistId],
+    "|",
+    "|",
+    "|",
+    ["applied_on", "=", "3_global"],
+    ["applied_on", "=", "2_product_category"],
+    ["product_tmpl_id", "in", templateIds.length ? templateIds : [0]],
+    ["product_id", "in", variantIds.length ? variantIds : [0]],
+  ];
 
-  return null;
+  const items = await odooCall("product.pricelist.item", "search_read", {
+    domain,
+    fields: [
+      "id",
+      "applied_on",
+      "compute_price",
+      "fixed_price",
+      "percent_price",
+      "price_discount",
+      "price_surcharge",
+      "product_tmpl_id",
+      "product_id",
+      "categ_id",
+      "min_quantity",
+      "base",
+    ],
+    limit: 5000,
+  });
+
+  pricelistItemsCache.set(cacheKey, { time: now, items: items || [] });
+  return items || [];
 }
 
 /**
- * Return Map<templateId, price> using the given pricelist.
+ * This Odoo build blocks private pricelist helpers over RPC and has no
+ * product.product `price` field. Resolve from public pricelist items instead.
  */
-export async function getPricelistPricesForProducts(pricelistId, products, partnerId) {
-  if (!pricelistId || !products?.length) {
-    return new Map();
-  }
-
-  try {
-    const viaContext = await getPricesViaProductContext(
-      pricelistId,
-      products,
-      partnerId
-    );
-    if (viaContext.size) {
-      return viaContext;
-    }
-  } catch (err) {
-    console.log("PRICELIST context price failed:", err.message);
-  }
-
-  try {
-    const viaRule = await getPricesViaComputePriceRule(pricelistId, products);
-    if (viaRule.size) {
-      return viaRule;
-    }
-  } catch (err) {
-    console.log("PRICELIST _compute_price_rule failed:", err.message);
-  }
-
+export async function getPricelistPricesForProducts(pricelistId, products, _partnerId) {
   const prices = new Map();
 
-  await Promise.all(
-    products.map(async (product) => {
-      const variantId = getVariantId(product);
-      if (!variantId) {
-        return;
-      }
+  if (!pricelistId || !products?.length) {
+    return prices;
+  }
 
-      const price = await getSingleProductPrice(pricelistId, variantId);
+  try {
+    const items = await loadPricelistItems(pricelistId, products);
+
+    for (const product of products) {
+      const price = resolvePriceFromItems(items, product, 1);
       if (price != null) {
         prices.set(product.id, price);
       }
-    })
-  );
+    }
+
+    if (prices.size) {
+      return prices;
+    }
+  } catch (err) {
+    console.log("PRICELIST item resolve failed:", err.message);
+  }
+
+  // Last resort: lst_price with pricelist context (works on some Odoo builds).
+  try {
+    const pairs = products
+      .map((product) => ({
+        templateId: product.id,
+        variantId: getVariantId(product),
+      }))
+      .filter((pair) => pair.variantId);
+
+    if (!pairs.length) {
+      return prices;
+    }
+
+    const variantIds = [...new Set(pairs.map((pair) => pair.variantId))];
+    const rows = await odooCall("product.product", "read", {
+      args: [variantIds, ["id", "lst_price"]],
+      kwargs: {
+        context: {
+          pricelist: pricelistId,
+          partner: _partnerId || false,
+        },
+      },
+    });
+
+    const byVariant = new Map();
+    for (const row of rows || []) {
+      const value = Number(row.lst_price);
+      if (Number.isFinite(value)) {
+        byVariant.set(row.id, value);
+      }
+    }
+
+    for (const { templateId, variantId } of pairs) {
+      if (byVariant.has(variantId)) {
+        prices.set(templateId, byVariant.get(variantId));
+      }
+    }
+  } catch (err) {
+    console.log("PRICELIST lst_price context failed:", err.message);
+  }
 
   return prices;
 }
@@ -369,13 +453,6 @@ export async function applyMembershipPricesToProducts(products, partnerId) {
   );
 
   if (!prices.size) {
-    console.log("PRICELIST prices empty", {
-      partnerId,
-      pricelistId,
-      tier,
-      pricelistName,
-      productCount: products.length,
-    });
     return products;
   }
 

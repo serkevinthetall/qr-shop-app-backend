@@ -19,7 +19,6 @@ import {
 } from "../utils/product-ribbon.js";
 import {
   applyMembershipPricesToProducts,
-  getPricelistPricesForProducts,
   resolvePricelistForPartner,
 } from "../utils/membership-pricelist.js";
 
@@ -459,146 +458,56 @@ export async function getCategories(req, res) {
 /** Temporary diagnostic for membership pricelist pricing. Remove after fix verified. */
 export async function debugPricelist(req, res) {
   try {
-    const productId = Number(req.query.product_id) || 439;
+    const productId = Number(req.query.product_id) || 403;
     const partnerId = getRequestPartnerId(req);
-
-    const pricelists = await odooCall("product.pricelist", "search_read", {
-      domain: [],
-      fields: ["id", "name", "active", "currency_id"],
-      limit: 30,
-    });
+    const { getPricelistPricesForProducts } = await import(
+      "../utils/membership-pricelist.js"
+    );
 
     const products = await odooCall("product.template", "search_read", {
       domain: [["id", "=", productId]],
-      fields: ["id", "name", "list_price", "product_variant_id"],
+      fields: ["id", "name", "list_price", "product_variant_id", "categ_id"],
       limit: 1,
     });
 
     const product = products[0] || null;
     const resolved = await resolvePricelistForPartner(partnerId);
-    const variantId = product
-      ? Array.isArray(product.product_variant_id)
-        ? product.product_variant_id[0]
-        : product.product_variant_id
-      : null;
+    const [priced] = product
+      ? await applyMembershipPricesToProducts([product], partnerId)
+      : [null];
 
-    const publicMethodTests = [];
-    const itemSamples = {};
+    const byTier = {};
 
-    for (const list of pricelists || []) {
-      if (!variantId) break;
+    for (const [tier, name] of [
+      ["default", "Default"],
+      ["premium", "Premium Membership"],
+      ["pro", "Pro Membership"],
+    ]) {
+      const lists = await odooCall("product.pricelist", "search_read", {
+        domain: [["name", "=", name]],
+        fields: ["id", "name"],
+        limit: 1,
+      });
+      const listId = lists[0]?.id;
 
-      for (const attempt of [
-        {
-          label: "get_product_price(product, qty, partner)",
-          method: "get_product_price",
-          params: {
-            args: [[list.id], variantId, 1.0, partnerId || false],
-          },
-        },
-        {
-          label: "get_product_price(product, qty)",
-          method: "get_product_price",
-          params: {
-            args: [[list.id], variantId, 1.0],
-          },
-        },
-        {
-          label: "get_product_price kwargs",
-          method: "get_product_price",
-          params: {
-            args: [[list.id]],
-            kwargs: {
-              product: variantId,
-              quantity: 1.0,
-              partner: partnerId || false,
-            },
-          },
-        },
-        {
-          label: "price_get",
-          method: "price_get",
-          params: {
-            args: [[list.id], [variantId], 1.0],
-          },
-        },
-      ]) {
-        try {
-          const result = await odooCall(
-            "product.pricelist",
-            attempt.method,
-            attempt.params
-          );
-          publicMethodTests.push({
-            pricelist: list.name,
-            pricelistId: list.id,
-            attempt: attempt.label,
-            result,
-          });
-        } catch (err) {
-          publicMethodTests.push({
-            pricelist: list.name,
-            pricelistId: list.id,
-            attempt: attempt.label,
-            error: err.message,
-          });
-        }
+      if (!listId || !product) {
+        byTier[tier] = null;
+        continue;
       }
 
-      try {
-        itemSamples[list.name] = await odooCall(
-          "product.pricelist.item",
-          "search_read",
-          {
-            domain: [["pricelist_id", "=", list.id]],
-            fields: [
-              "id",
-              "applied_on",
-              "compute_price",
-              "fixed_price",
-              "percent_price",
-              "price_discount",
-              "product_tmpl_id",
-              "product_id",
-              "categ_id",
-              "min_quantity",
-              "base",
-              "price_surcharge",
-            ],
-            limit: 8,
-          }
-        );
-      } catch (err) {
-        itemSamples[list.name] = { error: err.message };
-      }
-    }
-
-    let variantFields = null;
-    if (variantId) {
-      try {
-        const fieldsGet = await odooCall("product.product", "fields_get", {
-          args: [],
-          kwargs: {
-            attributes: ["string", "type"],
-          },
-        });
-        variantFields = Object.keys(fieldsGet || {})
-          .filter((name) => /price|list|pricelist/i.test(name))
-          .sort();
-      } catch (err) {
-        variantFields = { error: err.message };
-      }
+      const map = await getPricelistPricesForProducts(listId, [product], partnerId);
+      byTier[tier] = {
+        pricelistId: listId,
+        price: map.get(product.id) ?? null,
+      };
     }
 
     return success(res, {
       partnerId,
       product,
-      variantId,
       resolved,
-      publicMethodTests,
-      itemSamples,
-      variantPriceFields: variantFields,
-      pricelists,
+      priced_list_price: priced?.list_price ?? null,
+      byTier,
     });
   } catch (err) {
     return error(res, "Pricelist debug failed", 500, getOdooError(err));
