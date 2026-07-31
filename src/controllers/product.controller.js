@@ -17,7 +17,11 @@ import {
   resolveProductRibbons,
   resolveProductRibbonsForList,
 } from "../utils/product-ribbon.js";
-import { applyMembershipPricesToProducts } from "../utils/membership-pricelist.js";
+import {
+  applyMembershipPricesToProducts,
+  getPricelistPricesForProducts,
+  resolvePricelistForPartner,
+} from "../utils/membership-pricelist.js";
 
 let categoriesCache = null;
 let categoriesCacheTime = 0;
@@ -449,5 +453,112 @@ export async function getCategories(req, res) {
     });
   } catch (err) {
     return error(res, "Failed to get categories", 500, getOdooError(err));
+  }
+}
+
+/** Temporary diagnostic for membership pricelist pricing. Remove after fix verified. */
+export async function debugPricelist(req, res) {
+  try {
+    const productId = Number(req.query.product_id) || 439;
+    const partnerId = getRequestPartnerId(req);
+
+    const pricelists = await odooCall("product.pricelist", "search_read", {
+      domain: [],
+      fields: ["id", "name", "active", "currency_id"],
+      limit: 30,
+    });
+
+    const products = await odooCall("product.template", "search_read", {
+      domain: [["id", "=", productId]],
+      fields: ["id", "name", "list_price", "product_variant_id"],
+      limit: 1,
+    });
+
+    const product = products[0] || null;
+    const resolved = await resolvePricelistForPartner(partnerId);
+
+    let priceMap = {};
+    let priced = null;
+    let contextRead = null;
+    let computeRule = null;
+    let items = [];
+
+    if (product && resolved.pricelistId) {
+      const map = await getPricelistPricesForProducts(
+        resolved.pricelistId,
+        [product],
+        partnerId
+      );
+      priceMap = Object.fromEntries(map.entries());
+      [priced] = await applyMembershipPricesToProducts([product], partnerId);
+
+      const variantId = Array.isArray(product.product_variant_id)
+        ? product.product_variant_id[0]
+        : product.product_variant_id;
+
+      try {
+        contextRead = await odooCall("product.product", "read", {
+          args: [[variantId], ["id", "price", "lst_price", "list_price"]],
+          kwargs: {
+            context: {
+              pricelist: resolved.pricelistId,
+              partner: partnerId || false,
+            },
+          },
+        });
+      } catch (err) {
+        contextRead = { error: err.message };
+      }
+
+      try {
+        computeRule = await odooCall("product.pricelist", "_compute_price_rule", {
+          args: [[resolved.pricelistId], [variantId], 1.0],
+        });
+      } catch (err) {
+        computeRule = { error: err.message };
+      }
+
+      try {
+        items = await odooCall("product.pricelist.item", "search_read", {
+          domain: [
+            ["pricelist_id", "=", resolved.pricelistId],
+            "|",
+            "|",
+            ["product_tmpl_id", "=", productId],
+            ["product_id", "=", variantId],
+            ["applied_on", "=", "3_global"],
+          ],
+          fields: [
+            "id",
+            "pricelist_id",
+            "applied_on",
+            "compute_price",
+            "fixed_price",
+            "percent_price",
+            "price_discount",
+            "product_tmpl_id",
+            "product_id",
+            "min_quantity",
+          ],
+          limit: 20,
+        });
+      } catch (err) {
+        items = [{ error: err.message }];
+      }
+    }
+
+    return success(res, {
+      partnerId,
+      product,
+      resolved,
+      priceMap,
+      priced_list_price: priced?.list_price ?? null,
+      contextRead,
+      computeRule,
+      matchingItems: items,
+      pricelists,
+    });
+  } catch (err) {
+    return error(res, "Pricelist debug failed", 500, getOdooError(err));
   }
 }
