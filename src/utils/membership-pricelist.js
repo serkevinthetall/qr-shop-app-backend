@@ -107,13 +107,11 @@ async function loadPricelistIdsByName() {
   const lists = await odooCall("product.pricelist", "search_read", {
     domain: [
       "|",
-      "|",
       ["name", "ilike", "Premium Membership"],
       ["name", "ilike", "Pro Membership"],
-      ["name", "ilike", "Default"],
     ],
     fields: ["id", "name"],
-    limit: 50,
+    limit: 20,
   });
 
   const map = new Map();
@@ -147,51 +145,37 @@ async function getActiveMembershipLevel(partnerId) {
 
 /**
  * Resolve the Odoo pricelist for a partner from active membership.
- * Premium → Premium Membership, Pro → Pro Membership, else Default.
+ * Premium → Premium Membership, Pro → Pro Membership.
+ * Everyone else keeps the product's normal list_price (no Default pricelist).
  */
 export async function resolvePricelistForPartner(partnerId) {
-  const idsByName = await loadPricelistIdsByName();
-
   if (!partnerId) {
     return {
-      pricelistId: pickPricelistId(idsByName, "Default"),
+      pricelistId: null,
       tier: "default",
       level: null,
-      pricelistName: "Default",
+      pricelistName: null,
     };
   }
 
-  const [level, partners] = await Promise.all([
+  const [level, idsByName] = await Promise.all([
     getActiveMembershipLevel(partnerId),
-    odooCall("res.partner", "search_read", {
-      domain: [["id", "=", partnerId]],
-      fields: ["id", "property_product_pricelist"],
-      limit: 1,
-    }),
+    loadPricelistIdsByName(),
   ]);
 
   const tier = resolveMembershipTier(level);
-  const targetName =
-    tier === "premium" || tier === "pro"
-      ? MEMBERSHIP_PRICELIST_NAMES[tier]
-      : "Default";
 
-  let pricelistId = pickPricelistId(idsByName, targetName);
-
-  const partnerPricelist = partners[0]?.property_product_pricelist;
-  const partnerPricelistId = Array.isArray(partnerPricelist)
-    ? partnerPricelist[0]
-    : typeof partnerPricelist === "number"
-      ? partnerPricelist
-      : null;
-
-  if (!pricelistId && partnerPricelistId) {
-    pricelistId = partnerPricelistId;
+  if (tier !== "premium" && tier !== "pro") {
+    return {
+      pricelistId: null,
+      tier: "default",
+      level: membershipLevelLabel(level) || null,
+      pricelistName: null,
+    };
   }
 
-  if (!pricelistId) {
-    pricelistId = pickPricelistId(idsByName, "Default");
-  }
+  const targetName = MEMBERSHIP_PRICELIST_NAMES[tier];
+  const pricelistId = pickPricelistId(idsByName, targetName);
 
   return {
     pricelistId,
