@@ -476,86 +476,128 @@ export async function debugPricelist(req, res) {
 
     const product = products[0] || null;
     const resolved = await resolvePricelistForPartner(partnerId);
-
-    let priceMap = {};
-    let priced = null;
-    let contextRead = null;
-    let computeRule = null;
-    let items = [];
-
-    if (product && resolved.pricelistId) {
-      const map = await getPricelistPricesForProducts(
-        resolved.pricelistId,
-        [product],
-        partnerId
-      );
-      priceMap = Object.fromEntries(map.entries());
-      [priced] = await applyMembershipPricesToProducts([product], partnerId);
-
-      const variantId = Array.isArray(product.product_variant_id)
+    const variantId = product
+      ? Array.isArray(product.product_variant_id)
         ? product.product_variant_id[0]
-        : product.product_variant_id;
+        : product.product_variant_id
+      : null;
 
-      try {
-        contextRead = await odooCall("product.product", "read", {
-          args: [[variantId], ["id", "price", "lst_price", "list_price"]],
-          kwargs: {
-            context: {
-              pricelist: resolved.pricelistId,
+    const publicMethodTests = [];
+    const itemSamples = {};
+
+    for (const list of pricelists || []) {
+      if (!variantId) break;
+
+      for (const attempt of [
+        {
+          label: "get_product_price(product, qty, partner)",
+          method: "get_product_price",
+          params: {
+            args: [[list.id], variantId, 1.0, partnerId || false],
+          },
+        },
+        {
+          label: "get_product_price(product, qty)",
+          method: "get_product_price",
+          params: {
+            args: [[list.id], variantId, 1.0],
+          },
+        },
+        {
+          label: "get_product_price kwargs",
+          method: "get_product_price",
+          params: {
+            args: [[list.id]],
+            kwargs: {
+              product: variantId,
+              quantity: 1.0,
               partner: partnerId || false,
             },
           },
-        });
-      } catch (err) {
-        contextRead = { error: err.message };
+        },
+        {
+          label: "price_get",
+          method: "price_get",
+          params: {
+            args: [[list.id], [variantId], 1.0],
+          },
+        },
+      ]) {
+        try {
+          const result = await odooCall(
+            "product.pricelist",
+            attempt.method,
+            attempt.params
+          );
+          publicMethodTests.push({
+            pricelist: list.name,
+            pricelistId: list.id,
+            attempt: attempt.label,
+            result,
+          });
+        } catch (err) {
+          publicMethodTests.push({
+            pricelist: list.name,
+            pricelistId: list.id,
+            attempt: attempt.label,
+            error: err.message,
+          });
+        }
       }
 
       try {
-        computeRule = await odooCall("product.pricelist", "_compute_price_rule", {
-          args: [[resolved.pricelistId], [variantId], 1.0],
-        });
+        itemSamples[list.name] = await odooCall(
+          "product.pricelist.item",
+          "search_read",
+          {
+            domain: [["pricelist_id", "=", list.id]],
+            fields: [
+              "id",
+              "applied_on",
+              "compute_price",
+              "fixed_price",
+              "percent_price",
+              "price_discount",
+              "product_tmpl_id",
+              "product_id",
+              "categ_id",
+              "min_quantity",
+              "base",
+              "price_surcharge",
+            ],
+            limit: 8,
+          }
+        );
       } catch (err) {
-        computeRule = { error: err.message };
+        itemSamples[list.name] = { error: err.message };
       }
+    }
 
+    let variantFields = null;
+    if (variantId) {
       try {
-        items = await odooCall("product.pricelist.item", "search_read", {
-          domain: [
-            ["pricelist_id", "=", resolved.pricelistId],
-            "|",
-            "|",
-            ["product_tmpl_id", "=", productId],
-            ["product_id", "=", variantId],
-            ["applied_on", "=", "3_global"],
-          ],
-          fields: [
-            "id",
-            "pricelist_id",
-            "applied_on",
-            "compute_price",
-            "fixed_price",
-            "percent_price",
-            "price_discount",
-            "product_tmpl_id",
-            "product_id",
-            "min_quantity",
-          ],
-          limit: 20,
+        const fieldsGet = await odooCall("product.product", "fields_get", {
+          args: [],
+          kwargs: {
+            attributes: ["string", "type"],
+          },
         });
+        variantFields = Object.keys(fieldsGet || {})
+          .filter((name) => /price|list|pricelist/i.test(name))
+          .sort();
       } catch (err) {
-        items = [{ error: err.message }];
+        variantFields = { error: err.message };
       }
     }
 
     return success(res, {
       partnerId,
       product,
+      variantId,
       resolved,
-      priceMap,
-      priced_list_price: priced?.list_price ?? null,
-      contextRead,
-      computeRule,
-      matchingItems: items,
+      publicMethodTests,
+      itemSamples,
+      variantPriceFields: variantFields,
       pricelists,
     });
   } catch (err) {
