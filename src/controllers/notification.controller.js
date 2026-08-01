@@ -86,9 +86,58 @@ function rejectUnauthorizedWebhook(res, reason) {
 }
 
 function getWebhookRecordId(body) {
-  const raw = body?._id ?? body?.id ?? body?.record_id;
+  const candidates = [
+    body?._id,
+    body?.id,
+    body?.record_id,
+    body?.res_id,
+    body?.["id"],
+    Array.isArray(body?._id) ? body._id[0] : null,
+  ];
 
-  return Number(raw) || 0;
+  for (const candidate of candidates) {
+    const id = Number(candidate);
+    if (id > 0) {
+      return id;
+    }
+  }
+
+  return 0;
+}
+
+function getWebhookRibbonName(body) {
+  const raw =
+    body?.website_ribbon_id ??
+    body?.["website_ribbon_id/id"] ??
+    body?.ribbon ??
+    body?.ribbon_name;
+
+  if (Array.isArray(raw)) {
+    // Odoo many2one often arrives as [id, "Arrival"] or just the display name in [1].
+    return String(raw[1] || raw[0] || "").trim();
+  }
+
+  if (raw && typeof raw === "object") {
+    return String(raw.display_name || raw.name || "").trim();
+  }
+
+  return String(raw || "").trim();
+}
+
+function resolveNotifiableRibbon(product, webhookBody) {
+  const fromProduct = getProductRibbonName(product);
+  if (fromProduct && !isBlockedRibbonName(fromProduct)) {
+    return fromProduct;
+  }
+
+  // Odoo webhooks can fire slightly before search_read sees the new ribbon.
+  // Prefer the ribbon value included in the webhook payload when present.
+  const fromWebhook = getWebhookRibbonName(webhookBody);
+  if (fromWebhook && !isBlockedRibbonName(fromWebhook)) {
+    return fromWebhook;
+  }
+
+  return "";
 }
 
 async function loadAppProduct(productId) {
@@ -237,29 +286,64 @@ export async function webhookNewProduct(req, res) {
     const productId = getWebhookRecordId(req.body);
     let productName = String(req.body?.name || "").trim();
 
+    if (!productId) {
+      console.warn("Product webhook ignored: missing product id", {
+        bodyKeys: Object.keys(req.body || {}),
+      });
+      return success(res, {
+        message: "Product ignored: missing product id in webhook body",
+        sent: 0,
+        reason: "missing_product_id",
+      });
+    }
+
     const product = await loadAppProduct(productId);
 
-    if (!product || !isNotifiableRibbonProduct(product)) {
-      console.warn("Product webhook ignored:", {
+    if (!product) {
+      console.warn("Product webhook ignored: not an app-published product", {
         productId,
-        hasProduct: Boolean(product),
-        ribbon: product ? getProductRibbonName(product) : null,
       });
       return success(res, {
         message:
-          "Product ignored (must be app-tagged, published, and have a notifiable ribbon)",
+          "Product ignored (must be QR App tagged, saleable, and website published)",
         sent: 0,
+        reason: "not_app_product",
+        productId,
+      });
+    }
+
+    const ribbonName = resolveNotifiableRibbon(product, req.body);
+
+    if (!ribbonName) {
+      console.warn("Product webhook ignored: no notifiable ribbon", {
+        productId,
+        odooRibbon: getProductRibbonName(product),
+        webhookRibbon: getWebhookRibbonName(req.body),
+      });
+      return success(res, {
+        message:
+          "Product ignored (ribbon empty / Sold out / Out of stock). Arrival/Sale/New should notify.",
+        sent: 0,
+        reason: "ribbon_not_notifiable",
+        productId,
+        odoo_ribbon: getProductRibbonName(product) || null,
+        webhook_ribbon: getWebhookRibbonName(req.body) || null,
       });
     }
 
     productName = productName || product.name;
-    const ribbonName = getProductRibbonName(product);
 
     const tokenEntries = await getAllPushTokenEntries();
 
     if (!tokenEntries.length) {
       console.warn("Product webhook: no registered push tokens in Odoo");
-      return success(res, { message: "No registered push tokens", sent: 0 });
+      return success(res, {
+        message: "No registered push tokens",
+        sent: 0,
+        reason: "no_tokens",
+        productId,
+        ribbon: ribbonName,
+      });
     }
 
     const result = await sendExpoPushMessages(
@@ -280,6 +364,8 @@ export async function webhookNewProduct(req, res) {
       message: "Product push sent",
       sent: summary.ok,
       failed: summary.errors.length,
+      productId,
+      ribbon: ribbonName,
       tickets: result.data,
     });
   } catch (err) {
