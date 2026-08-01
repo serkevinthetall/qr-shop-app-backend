@@ -1,4 +1,5 @@
 import { odooCall } from "../services/odoo.service.js";
+import { getAppProductDomain } from "./product-filters.js";
 
 const PRICELIST_CACHE_TTL_MS = 30 * 1000;
 const PRICELIST_ITEMS_CACHE_TTL_MS = 30 * 1000;
@@ -452,4 +453,71 @@ export async function applyMembershipPricesToProducts(products, partnerId) {
       list_price: nextPrice,
     };
   });
+}
+
+/**
+ * Cheap fingerprint for "did prices need a rebuild?"
+ * Includes pricelist rule edits and product write_date changes.
+ */
+export async function getPricelistVersion(pricelistId) {
+  const productStamp = await odooCall("product.template", "search_read", {
+    domain: getAppProductDomain(),
+    fields: ["write_date"],
+    order: "write_date desc",
+    limit: 1,
+  });
+  const productLatest = productStamp[0]?.write_date || "0";
+
+  if (!pricelistId) {
+    return `default:${productLatest}`;
+  }
+
+  const items = await odooCall("product.pricelist.item", "search_read", {
+    domain: [["pricelist_id", "=", pricelistId]],
+    fields: ["id", "write_date"],
+    order: "write_date desc",
+    limit: 1,
+  });
+
+  const itemLatest = items[0]?.write_date || "0";
+  return `${pricelistId}:${itemLatest}:${productLatest}`;
+}
+
+/**
+ * Lightweight membership prices for app products (id + list_price only).
+ * If `sinceVersion` matches the current pricelist fingerprint, returns unchanged.
+ */
+export async function getMembershipProductPriceSnapshot(partnerId, sinceVersion = "") {
+  const { pricelistId, tier } = await resolvePricelistForPartner(partnerId);
+  const version = await getPricelistVersion(pricelistId);
+
+  if (sinceVersion && sinceVersion === version) {
+    return {
+      unchanged: true,
+      version,
+      pricelistId,
+      tier,
+      prices: [],
+    };
+  }
+
+  const products = await odooCall("product.template", "search_read", {
+    domain: getAppProductDomain(),
+    fields: ["id", "list_price", "product_variant_id", "categ_id"],
+    limit: 500,
+    order: "id asc",
+  });
+
+  const priced = await applyMembershipPricesToProducts(products || [], partnerId);
+
+  return {
+    unchanged: false,
+    version,
+    pricelistId,
+    tier,
+    prices: priced.map((product) => ({
+      id: product.id,
+      list_price: Number(product.list_price) || 0,
+    })),
+  };
 }

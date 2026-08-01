@@ -18,6 +18,7 @@ import {
   resolveProductRibbonsForList,
 } from "../utils/product-ribbon.js";
 import { applyMembershipPricesToProducts } from "../utils/membership-pricelist.js";
+import { getMembershipProductPriceSnapshot } from "../utils/membership-pricelist.js";
 
 let categoriesCache = null;
 let categoriesCacheTime = 0;
@@ -423,6 +424,21 @@ async function loadCategoriesFromOdoo() {
 
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
+}
+
+export async function getProductPrices(req, res) {
+  try {
+    const partnerId = getRequestPartnerId(req);
+    const sinceVersion = String(req.query.version || "").trim();
+    const snapshot = await getMembershipProductPriceSnapshot(
+      partnerId,
+      sinceVersion
+    );
+
+    return success(res, snapshot);
+  } catch (err) {
+    return error(res, "Failed to get product prices", 500, getOdooError(err));
+  }
 }
 
 export async function getCategories(req, res) {
