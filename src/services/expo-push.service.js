@@ -127,3 +127,18 @@ export function buildCouponPushMessages(entries, coupon) {
     });
   });
 }
+
+export function buildTestPushMessages(entries) {
+  return entries.map(({ to, language }) => {
+    const copy = getPushCopy(language);
+
+    return withAndroidDeliveryDefaults({
+      to,
+      sound: "default",
+      title: copy.productTitle(""),
+      body: copy.productBody(""),
+      channelId: ANDROID_CHANNEL_ID,
+      data: { type: "test" },
+    });
+  });
+}

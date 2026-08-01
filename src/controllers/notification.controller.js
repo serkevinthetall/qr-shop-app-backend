@@ -4,10 +4,10 @@ import { odooCall } from "../services/odoo.service.js";
 import {
   buildCouponPushMessages,
   buildProductPushMessages,
+  buildTestPushMessages,
   sendExpoPushMessages,
   summarizeExpoPushTickets,
 } from "../services/expo-push.service.js";
-import { getPushCopy } from "../utils/push-i18n.js";
 import {
   getAllPushTokenEntries,
   getPushTokenEntriesForPartner,
@@ -160,21 +160,7 @@ export async function sendTestPush(req, res) {
       );
     }
 
-    const result = await sendExpoPushMessages(
-      tokenEntries.map((entry) => {
-        const copy = getPushCopy(entry.language);
-
-        return {
-          to: entry.to,
-          sound: "default",
-          title: copy.productTitle(""),
-          body: copy.productBody(""),
-          channelId: "default",
-          priority: "high",
-          data: { type: "test" },
-        };
-      })
-    );
+    const result = await sendExpoPushMessages(buildTestPushMessages(tokenEntries));
 
     const summary = summarizeExpoPushTickets(result.data);
 
