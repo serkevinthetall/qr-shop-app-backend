@@ -17,8 +17,10 @@ import {
   resolveProductRibbons,
   resolveProductRibbonsForList,
 } from "../utils/product-ribbon.js";
-import { applyMembershipPricesToProducts } from "../utils/membership-pricelist.js";
-import { getMembershipProductPriceSnapshot } from "../utils/membership-pricelist.js";
+import {
+  applyMembershipPricesToProducts,
+  getMembershipProductPriceSnapshot,
+} from "../utils/membership-pricelist.js";
 
 let categoriesCache = null;
 let categoriesCacheTime = 0;
