@@ -1,7 +1,7 @@
 import { odooCall } from "../services/odoo.service.js";
 
-const PRICELIST_CACHE_TTL_MS = 5 * 60 * 1000;
-const PRICELIST_ITEMS_CACHE_TTL_MS = 2 * 60 * 1000;
+const PRICELIST_CACHE_TTL_MS = 30 * 1000;
+const PRICELIST_ITEMS_CACHE_TTL_MS = 30 * 1000;
 
 /** Map membership level labels to Odoo pricelist names. */
 const MEMBERSHIP_PRICELIST_NAMES = {
