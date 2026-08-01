@@ -33,7 +33,8 @@ export async function sendExpoPushMessages(messages) {
   const results = [];
 
   for (const batch of chunk(valid, 100)) {
-    const response = await fetch(EXPO_PUSH_URL, {
+    // FCM V1 is required for Android delivery via Expo Push.
+    const response = await fetch(`${EXPO_PUSH_URL}?useFcmV1=true`, {
       method: "POST",
       headers,
       body: JSON.stringify(batch),
@@ -51,6 +52,28 @@ export async function sendExpoPushMessages(messages) {
   }
 
   return { data: results };
+}
+
+export function summarizeExpoPushTickets(tickets = []) {
+  const errors = [];
+  let ok = 0;
+
+  for (const ticket of tickets) {
+    if (!ticket || ticket.status === "ok") {
+      ok += 1;
+      continue;
+    }
+
+    const detail =
+      ticket.message ||
+      ticket.details?.error ||
+      ticket.details?.fault ||
+      "Push ticket error";
+
+    errors.push(String(detail));
+  }
+
+  return { ok, errors };
 }
 
 function withAndroidDeliveryDefaults(message) {

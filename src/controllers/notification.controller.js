@@ -5,6 +5,7 @@ import {
   buildCouponPushMessages,
   buildProductPushMessages,
   sendExpoPushMessages,
+  summarizeExpoPushTickets,
 } from "../services/expo-push.service.js";
 import { getPushCopy } from "../utils/push-i18n.js";
 import {
@@ -152,7 +153,11 @@ export async function sendTestPush(req, res) {
     const tokenEntries = await getPushTokenEntriesForPartner(user.partner_id);
 
     if (!tokenEntries.length) {
-      return error(res, "No Expo push token registered for this account", 400);
+      return error(
+        res,
+        "No Expo push token registered for this account. Open the Play Store app, allow notifications, and log in again.",
+        400
+      );
     }
 
     const result = await sendExpoPushMessages(
@@ -171,9 +176,20 @@ export async function sendTestPush(req, res) {
       })
     );
 
+    const summary = summarizeExpoPushTickets(result.data);
+
+    if (summary.errors.length) {
+      return error(res, summary.errors[0], 502, {
+        tickets: result.data,
+        tokens: tokenEntries.map((entry) => entry.to),
+      });
+    }
+
     return success(res, {
       message: "Test push sent",
+      sent: summary.ok,
       tickets: result.data,
+      tokens: tokenEntries.map((entry) => entry.to),
     });
   } catch (err) {
     return error(res, "Failed to send test push", 500, getOdooError(err));
