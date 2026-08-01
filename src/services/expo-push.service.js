@@ -79,9 +79,12 @@ export function summarizeExpoPushTickets(tickets = []) {
 function withAndroidDeliveryDefaults(message) {
   return {
     ...message,
-    // High priority reduces Doze delays on Android production devices.
+    // High priority + explicit channel keeps Android banners working in background.
     priority: "high",
     channelId: message.channelId || ANDROID_CHANNEL_ID,
+    sound: message.sound || "default",
+    ttl: message.ttl ?? 3600,
+    expiration: message.expiration ?? Math.floor(Date.now() / 1000) + 3600,
   };
 }
 
