@@ -1,6 +1,7 @@
 import express from "express";
 import {
   getNotifications,
+  getPushStatus,
   registerPushToken,
   sendTestPush,
   unregisterPushToken,
@@ -11,6 +12,7 @@ import {
 const router = express.Router();
 
 router.get("/", getNotifications);
+router.get("/push-status", getPushStatus);
 router.post("/register-token", registerPushToken);
 router.delete("/register-token", unregisterPushToken);
 router.post("/test-push", sendTestPush);

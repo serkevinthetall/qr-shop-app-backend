@@ -61,10 +61,28 @@ function verifyWebhookSecret(req) {
   const secret = String(process.env.ODOO_WEBHOOK_SECRET || "").trim();
 
   if (!secret) {
-    return false;
+    return { ok: false, reason: "missing_server_secret" };
   }
 
-  return String(req.query.secret || req.headers["x-webhook-secret"] || "").trim() === secret;
+  const provided = String(req.query.secret || req.headers["x-webhook-secret"] || "").trim();
+
+  if (!provided || provided !== secret) {
+    return { ok: false, reason: "bad_secret" };
+  }
+
+  return { ok: true, reason: null };
+}
+
+function rejectUnauthorizedWebhook(res, reason) {
+  if (reason === "missing_server_secret") {
+    console.error(
+      "ODOO_WEBHOOK_SECRET is not set on the server — Odoo cannot trigger background pushes"
+    );
+    return error(res, "Webhook secret not configured on server", 503);
+  }
+
+  console.warn("Unauthorized notification webhook:", reason);
+  return error(res, "Unauthorized webhook", 401);
 }
 
 function getWebhookRecordId(body) {
@@ -143,6 +161,32 @@ export async function unregisterPushToken(req, res) {
   }
 }
 
+export async function getPushStatus(req, res) {
+  try {
+    const user = getAuthUser(req);
+
+    if (!user) return error(res, "Unauthorized", 401);
+    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const tokenEntries = await getPushTokenEntriesForPartner(user.partner_id);
+    const webhookSecretConfigured = Boolean(
+      String(process.env.ODOO_WEBHOOK_SECRET || "").trim()
+    );
+
+    return success(res, {
+      partner_id: user.partner_id,
+      saved_on_server: tokenEntries.length > 0,
+      token_count: tokenEntries.length,
+      token_preview: tokenEntries[0]?.to
+        ? `${String(tokenEntries[0].to).slice(0, 28)}…`
+        : null,
+      webhook_secret_configured: webhookSecretConfigured,
+    });
+  } catch (err) {
+    return error(res, "Failed to get push status", 500, getOdooError(err));
+  }
+}
+
 export async function sendTestPush(req, res) {
   try {
     const user = getAuthUser(req);
@@ -184,8 +228,10 @@ export async function sendTestPush(req, res) {
 
 export async function webhookNewProduct(req, res) {
   try {
-    if (!verifyWebhookSecret(req)) {
-      return error(res, "Unauthorized webhook", 401);
+    const auth = verifyWebhookSecret(req);
+
+    if (!auth.ok) {
+      return rejectUnauthorizedWebhook(res, auth.reason);
     }
 
     const productId = getWebhookRecordId(req.body);
@@ -194,6 +240,11 @@ export async function webhookNewProduct(req, res) {
     const product = await loadAppProduct(productId);
 
     if (!product || !isNotifiableRibbonProduct(product)) {
+      console.warn("Product webhook ignored:", {
+        productId,
+        hasProduct: Boolean(product),
+        ribbon: product ? getProductRibbonName(product) : null,
+      });
       return success(res, {
         message:
           "Product ignored (must be app-tagged, published, and have a notifiable ribbon)",
@@ -207,6 +258,7 @@ export async function webhookNewProduct(req, res) {
     const tokenEntries = await getAllPushTokenEntries();
 
     if (!tokenEntries.length) {
+      console.warn("Product webhook: no registered push tokens in Odoo");
       return success(res, { message: "No registered push tokens", sent: 0 });
     }
 
@@ -218,9 +270,16 @@ export async function webhookNewProduct(req, res) {
       })
     );
 
+    const summary = summarizeExpoPushTickets(result.data);
+
+    if (summary.errors.length) {
+      console.error("Product webhook Expo ticket errors:", summary.errors);
+    }
+
     return success(res, {
       message: "Product push sent",
-      sent: tokenEntries.length,
+      sent: summary.ok,
+      failed: summary.errors.length,
       tickets: result.data,
     });
   } catch (err) {
@@ -230,8 +289,10 @@ export async function webhookNewProduct(req, res) {
 
 export async function webhookNewCoupon(req, res) {
   try {
-    if (!verifyWebhookSecret(req)) {
-      return error(res, "Unauthorized webhook", 401);
+    const auth = verifyWebhookSecret(req);
+
+    if (!auth.ok) {
+      return rejectUnauthorizedWebhook(res, auth.reason);
     }
 
     const couponId = getWebhookRecordId(req.body);
@@ -262,6 +323,7 @@ export async function webhookNewCoupon(req, res) {
     const tokenEntries = await getPushTokenEntriesForPartner(partnerId);
 
     if (!tokenEntries.length) {
+      console.warn("Coupon webhook: no push token for partner", partnerId);
       return success(res, { message: "No push token for this member", sent: 0 });
     }
 
@@ -269,9 +331,16 @@ export async function webhookNewCoupon(req, res) {
       buildCouponPushMessages(tokenEntries, { code: couponCode })
     );
 
+    const summary = summarizeExpoPushTickets(result.data);
+
+    if (summary.errors.length) {
+      console.error("Coupon webhook Expo ticket errors:", summary.errors);
+    }
+
     return success(res, {
       message: "Coupon push sent",
-      sent: tokenEntries.length,
+      sent: summary.ok,
+      failed: summary.errors.length,
       tickets: result.data,
     });
   } catch (err) {
