@@ -18,6 +18,7 @@ import {
   getAppProductDomain,
   getNotifiableRibbonOdooDomain,
   getProductRibbonName,
+  isBlockedRibbonName,
   isNotifiableRibbonProduct,
 } from "../utils/product-filters.js";
 
