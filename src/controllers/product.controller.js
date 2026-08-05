@@ -4,6 +4,7 @@ import { odooCall } from "../services/odoo.service.js";
 import {
   APP_PRODUCT_FIELDS,
   APP_PRODUCT_LIST_FIELDS,
+  APP_PRODUCT_ORDER,
   getAppProductDomain,
   getImageUrl,
 } from "../utils/product-filters.js";
@@ -215,7 +216,7 @@ export async function getProducts(req, res) {
       fields: APP_PRODUCT_LIST_FIELDS,
       limit,
       offset,
-      order: "name asc",
+      order: APP_PRODUCT_ORDER,
     });
 
     return success(res, {
@@ -274,7 +275,7 @@ export async function getProductById(req, res) {
               "write_date",
             ],
             limit: similarLimit,
-            order: "name asc",
+            order: APP_PRODUCT_ORDER,
           })
         : Promise.resolve([]);
 
@@ -341,7 +342,7 @@ export async function searchProducts(req, res) {
       domain,
       fields: APP_PRODUCT_LIST_FIELDS,
       limit: 30,
-      order: "name asc",
+      order: APP_PRODUCT_ORDER,
     });
 
     return success(res, {

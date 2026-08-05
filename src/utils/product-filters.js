@@ -33,6 +33,10 @@ export function getAppProductDomain(extra = []) {
   ];
 }
 
+/** Odoo yellow-star favourites first, then A–Z. */
+export const APP_PRODUCT_ORDER = "is_favorite desc, name asc";
+
+
 // Push + notification list: any website ribbon notifies, EXCEPT these.
 // Empty ribbon also does not notify.
 const BLOCKED_RIBBON_SUBSTRINGS = [
