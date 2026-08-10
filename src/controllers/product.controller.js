@@ -7,6 +7,7 @@ import {
   APP_PRODUCT_ORDER,
   getAppProductDomain,
   getImageUrl,
+  resolveAppProductOrder,
 } from "../utils/product-filters.js";
 import {
   attachProductTagNames,
@@ -187,6 +188,8 @@ export async function getProducts(req, res) {
     const limit = Number(req.query.limit || 20);
     const offset = Number(req.query.offset || 0);
     const categoryId = Number(req.query.category_id || 0);
+    const sort = String(req.query.sort || "").trim();
+    const order = resolveAppProductOrder(sort);
 
     let domain = getAppProductDomain();
 
@@ -206,6 +209,7 @@ export async function getProducts(req, res) {
         limit,
         offset,
         count: 0,
+        sort: sort || "default",
       });
     }
 
@@ -216,7 +220,7 @@ export async function getProducts(req, res) {
       fields: APP_PRODUCT_LIST_FIELDS,
       limit,
       offset,
-      order: APP_PRODUCT_ORDER,
+      order,
     });
 
     return success(res, {
@@ -227,6 +231,7 @@ export async function getProducts(req, res) {
       limit,
       offset,
       count: products.length,
+      sort: sort || "default",
     });
   } catch (err) {
     return error(res, "Failed to get products", 500, getOdooError(err));
@@ -312,6 +317,8 @@ export async function searchProducts(req, res) {
   try {
     const q = String(req.query.q || "").trim();
     const categoryId = Number(req.query.category_id || 0);
+    const sort = String(req.query.sort || "").trim();
+    const order = resolveAppProductOrder(sort);
 
     if (!q) {
       return error(res, "Search query is required", 400);
@@ -333,6 +340,7 @@ export async function searchProducts(req, res) {
       return success(res, {
         products: [],
         count: 0,
+        sort: sort || "default",
       });
     }
 
@@ -342,7 +350,7 @@ export async function searchProducts(req, res) {
       domain,
       fields: APP_PRODUCT_LIST_FIELDS,
       limit: 30,
-      order: APP_PRODUCT_ORDER,
+      order,
     });
 
     return success(res, {
@@ -351,6 +359,7 @@ export async function searchProducts(req, res) {
         partnerId: getRequestPartnerId(req),
       }),
       count: products.length,
+      sort: sort || "default",
     });
   } catch (err) {
     return error(res, "Failed to search products", 500, getOdooError(err));

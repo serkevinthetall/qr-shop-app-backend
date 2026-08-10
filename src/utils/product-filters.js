@@ -36,6 +36,39 @@ export function getAppProductDomain(extra = []) {
 /** Odoo yellow-star favourites first, then A–Z. */
 export const APP_PRODUCT_ORDER = "is_favorite desc, name asc";
 
+/**
+ * Map API `sort` query to an Odoo order string.
+ * - default / omitted → favourites first
+ * - price_desc → highest list_price first
+ * - price_asc → lowest list_price first
+ */
+export function resolveAppProductOrder(sort) {
+  const normalized = String(sort || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+
+  if (
+    normalized === "price_desc" ||
+    normalized === "price_high" ||
+    normalized === "highest" ||
+    normalized === "high_to_low"
+  ) {
+    return "list_price desc, name asc";
+  }
+
+  if (
+    normalized === "price_asc" ||
+    normalized === "price_low" ||
+    normalized === "lowest" ||
+    normalized === "low_to_high"
+  ) {
+    return "list_price asc, name asc";
+  }
+
+  return APP_PRODUCT_ORDER;
+}
+
 
 // Push + notification list: any website ribbon notifies, EXCEPT these.
 // Empty ribbon also does not notify.
