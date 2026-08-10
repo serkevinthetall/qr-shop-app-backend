@@ -1,6 +1,7 @@
 import { success, error } from "../utils/response.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
+import { filterCouponsForCurrentMonth } from "../utils/coupon-ticket-month.js";
 import { normalizePhone } from "../utils/phone.js";
 
 function getOdooError(err) {
@@ -81,8 +82,10 @@ export async function getMembershipCoupons(req, res) {
       limit: 50,
     });
 
+    // App shows coupons[0]. Only return this calendar month so last month's
+    // ticket never appears as the active code in Account / Checkout.
     return success(res, {
-      coupons,
+      coupons: filterCouponsForCurrentMonth(coupons),
     });
   } catch (err) {
     return error(res, "Failed to get membership coupons", 500, getOdooError(err));
