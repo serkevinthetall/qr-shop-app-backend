@@ -25,6 +25,25 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/api/app-config", (req, res) => {
+  const minVersion = String(process.env.APP_MIN_VERSION || "1.0.0").trim() || "1.0.0";
+
+  res.json({
+    success: true,
+    min_version: minVersion,
+    min_ios_version:
+      String(process.env.APP_MIN_IOS_VERSION || minVersion).trim() || minVersion,
+    min_android_version:
+      String(process.env.APP_MIN_ANDROID_VERSION || minVersion).trim() || minVersion,
+    ios_store_url: String(process.env.IOS_STORE_URL || "").trim(),
+    android_store_url:
+      String(
+        process.env.ANDROID_STORE_URL ||
+          "https://play.google.com/store/apps/details?id=com.qrshop.myanmar"
+      ).trim(),
+  });
+});
+
 app.use("/api/auth", authRoutes);
 app.use("/api/customer", customerRoutes);
 app.use("/api", productRoutes);
