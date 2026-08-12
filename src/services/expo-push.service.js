@@ -76,10 +76,10 @@ export function summarizeExpoPushTickets(tickets = []) {
   return { ok, errors };
 }
 
-function withAndroidDeliveryDefaults(message) {
+function withDeliveryDefaults(message) {
   return {
     ...message,
-    // High priority + explicit channel keeps Android banners working in background.
+    // High priority keeps Android + iOS banners working in background/killed.
     priority: "high",
     channelId: message.channelId || ANDROID_CHANNEL_ID,
     sound: message.sound || "default",
@@ -94,7 +94,7 @@ export function buildProductPushMessages(entries, product) {
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
-    return withAndroidDeliveryDefaults({
+    return withDeliveryDefaults({
       to,
       sound: "default",
       title: copy.productTitle(ribbonName),
@@ -114,7 +114,7 @@ export function buildCouponPushMessages(entries, coupon) {
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
-    return withAndroidDeliveryDefaults({
+    return withDeliveryDefaults({
       to,
       sound: "default",
       title: copy.couponTitle,
@@ -132,7 +132,7 @@ export function buildTestPushMessages(entries) {
   return entries.map(({ to, language }) => {
     const copy = getPushCopy(language);
 
-    return withAndroidDeliveryDefaults({
+    return withDeliveryDefaults({
       to,
       sound: "default",
       title: copy.productTitle(""),

@@ -14,6 +14,7 @@ import {
   removePushToken,
   upsertPushToken,
 } from "../services/push-token.store.js";
+import { sendCatchUpPushesForToken } from "../services/push-catch-up.service.js";
 import {
   getAppProductDomain,
   getNotifiableRibbonOdooDomain,
@@ -183,14 +184,35 @@ export async function registerPushToken(req, res) {
       return error(res, "Invalid Expo push token", 400);
     }
 
-    await upsertPushToken({
+    const upsert = await upsertPushToken({
       partnerId: user.partner_id,
       uid: user.uid,
       expoPushToken,
       language,
     });
 
-    return success(res, { message: "Push token registered" });
+    let catchUp = { sent: 0, errors: [] };
+
+    // Only for newly seen device tokens — avoids spamming on every app open.
+    if (upsert.isNewToken) {
+      try {
+        catchUp = await sendCatchUpPushesForToken({
+          partnerId: user.partner_id,
+          expoPushToken,
+          language,
+        });
+      } catch (err) {
+        console.warn("Push catch-up failed after register:", err.message);
+        catchUp = { sent: 0, errors: [err.message] };
+      }
+    }
+
+    return success(res, {
+      message: "Push token registered",
+      is_new_token: upsert.isNewToken,
+      token_count: upsert.tokenCount,
+      catch_up_sent: catchUp.sent,
+    });
   } catch (err) {
     return error(res, "Failed to register push token", 500, getOdooError(err));
   }
@@ -203,7 +225,12 @@ export async function unregisterPushToken(req, res) {
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
 
-    await removePushToken(user.partner_id);
+    const expoPushToken = String(
+      req.body?.expo_push_token || req.query?.expo_push_token || ""
+    ).trim();
+
+    // Prefer removing only this device so other phones keep receiving pushes.
+    await removePushToken(user.partner_id, expoPushToken || null);
 
     return success(res, { message: "Push token removed" });
   } catch (err) {
@@ -249,7 +276,7 @@ export async function sendTestPush(req, res) {
     if (!tokenEntries.length) {
       return error(
         res,
-        "No Expo push token registered for this account. Open the Play Store app, allow notifications, and log in again.",
+        "No Expo push token registered for this account. Open the app, allow notifications, and log in again.",
         400
       );
     }
