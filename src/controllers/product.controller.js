@@ -236,7 +236,7 @@ export async function getProducts(req, res) {
 export async function getProductById(req, res) {
   try {
     const id = Number(req.params.id);
-    const similarLimit = Number(req.query.similar_limit || 8);
+    const similarLimit = Math.max(0, Number(req.query.similar_limit ?? 8));
 
     if (!id) {
       return error(res, "Invalid product ID", 400);
@@ -257,27 +257,27 @@ export async function getProductById(req, res) {
       });
     }
 
-    let similarProducts = [];
+    const shouldLoadSimilar =
+      similarLimit > 0 && product.categ_id && product.categ_id[0];
 
-    const similarPromise =
-      product.categ_id && product.categ_id[0]
-        ? odooCall("product.template", "search_read", {
-            domain: getAppProductDomain([
-              ["categ_id", "=", product.categ_id[0]],
-              ["id", "!=", product.id],
-            ]),
-            fields: [
-              "id",
-              "name",
-              "list_price",
-              "description_sale",
-              "categ_id",
-              "write_date",
-            ],
-            limit: similarLimit,
-            order: APP_PRODUCT_ORDER,
-          })
-        : Promise.resolve([]);
+    const similarPromise = shouldLoadSimilar
+      ? odooCall("product.template", "search_read", {
+          domain: getAppProductDomain([
+            ["categ_id", "=", product.categ_id[0]],
+            ["id", "!=", product.id],
+          ]),
+          fields: [
+            "id",
+            "name",
+            "list_price",
+            "description_sale",
+            "categ_id",
+            "write_date",
+          ],
+          limit: similarLimit,
+          order: APP_PRODUCT_ORDER,
+        })
+      : Promise.resolve([]);
 
     const [ribbon, similarProductsResult, withTags] = await Promise.all([
       resolveProductRibbonFast(odooCall, product),
@@ -285,17 +285,15 @@ export async function getProductById(req, res) {
       attachProductTagNames([product]),
     ]);
 
-    similarProducts = similarProductsResult;
-
+    const similarProducts = similarProductsResult || [];
     const partnerId = getRequestPartnerId(req);
-    const [pricedMain] = await applyMembershipPricesToProducts(
-      [withTags[0] || product],
-      partnerId
-    );
-    const pricedSimilar = await applyMembershipPricesToProducts(
-      similarProducts,
-      partnerId
-    );
+
+    const [[pricedMain], pricedSimilar] = await Promise.all([
+      applyMembershipPricesToProducts([withTags[0] || product], partnerId),
+      similarProducts.length
+        ? applyMembershipPricesToProducts(similarProducts, partnerId)
+        : Promise.resolve([]),
+    ]);
 
     return success(res, {
       product: formatProduct(pricedMain || withTags[0] || product, ribbon),

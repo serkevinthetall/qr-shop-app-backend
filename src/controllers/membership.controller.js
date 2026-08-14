@@ -4,6 +4,10 @@ import { odooCall } from "../services/odoo.service.js";
 import { filterCouponsForCurrentMonth } from "../utils/coupon-ticket-month.js";
 import { normalizePhone } from "../utils/phone.js";
 
+/** Studio model for membership Apply requests (client contacts customer). */
+const MEMBERSHIP_APPLICATION_MODEL = "x_membership_applicati";
+const PLAN_FIELD = "x_studio_selection_field_2c0_1jvv3u0te";
+
 function getOdooError(err) {
   return (
     err.response?.data?.message ||
@@ -12,6 +16,35 @@ function getOdooError(err) {
     err.message ||
     "Unknown error"
   );
+}
+
+function formatOdooDatetime(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+}
+
+function mapPlanToOdoo(plan) {
+  const normalized = String(plan || "")
+    .trim()
+    .toLowerCase();
+
+  if (normalized === "pro") {
+    return "Pro";
+  }
+
+  if (normalized === "premium") {
+    return "Premium";
+  }
+
+  return null;
+}
+
+function asText(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim();
 }
 
 export async function getMembership(req, res) {
@@ -146,5 +179,140 @@ export async function checkMembership(req, res) {
     });
   } catch (err) {
     return error(res, "Failed to check membership", 500, getOdooError(err));
+  }
+}
+
+/**
+ * Latest membership Apply for the logged-in partner (Odoo Studio model).
+ * App maps Status "Requested" → Processing UI.
+ */
+export async function getMembershipApplication(req, res) {
+  try {
+    const user = getAuthUser(req);
+
+    if (!user) return error(res, "Unauthorized", 401);
+    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const rows = await odooCall(MEMBERSHIP_APPLICATION_MODEL, "search_read", {
+      domain: [["x_studio_customer", "=", user.partner_id]],
+      fields: [
+        "id",
+        "x_name",
+        "x_studio_customer",
+        PLAN_FIELD,
+        "x_studio_name",
+        "x_studio_phone",
+        "x_studio_email",
+        "x_studio_status",
+        "x_studio_requested_at",
+        "x_studio_notes_1",
+      ],
+      order: "id desc",
+      limit: 1,
+    });
+
+    const row = rows[0] || null;
+
+    return success(res, {
+      application: row
+        ? {
+            id: row.id,
+            plan: row[PLAN_FIELD] || null,
+            name: row.x_studio_name || "",
+            phone: row.x_studio_phone || "",
+            email: row.x_studio_email || "",
+            status: row.x_studio_status || null,
+            requested_at: row.x_studio_requested_at || null,
+          }
+        : null,
+    });
+  } catch (err) {
+    return error(res, "Failed to get membership application", 500, getOdooError(err));
+  }
+}
+
+/**
+ * Create (or reuse) a Requested membership application for Apply.
+ */
+export async function createMembershipApplication(req, res) {
+  try {
+    const user = getAuthUser(req);
+
+    if (!user) return error(res, "Unauthorized", 401);
+    if (!user.partner_id) return error(res, "No partner linked to this user", 400);
+
+    const odooPlan = mapPlanToOdoo(req.body?.plan);
+    const name = asText(req.body?.name);
+    const phone = asText(req.body?.phone);
+    const email = asText(req.body?.email);
+
+    if (!odooPlan) {
+      return error(res, "Plan must be pro or premium", 400);
+    }
+
+    if (!name) {
+      return error(res, "Name is required", 400);
+    }
+
+    // Reuse open Requested row so spam Apply does not flood Odoo.
+    const existing = await odooCall(MEMBERSHIP_APPLICATION_MODEL, "search_read", {
+      domain: [
+        ["x_studio_customer", "=", user.partner_id],
+        ["x_studio_status", "=", "Requested"],
+      ],
+      fields: ["id", PLAN_FIELD, "x_studio_status"],
+      order: "id desc",
+      limit: 1,
+    });
+
+    if (existing[0]) {
+      await odooCall(MEMBERSHIP_APPLICATION_MODEL, "write", {
+        ids: [existing[0].id],
+        vals: {
+          [PLAN_FIELD]: odooPlan,
+          x_studio_name: name,
+          x_studio_phone: phone || false,
+          x_studio_email: email || false,
+          x_studio_requested_at: formatOdooDatetime(),
+        },
+      });
+
+      return success(res, {
+        message: "Membership application updated",
+        application_id: existing[0].id,
+        status: "Requested",
+        plan: odooPlan,
+        reused: true,
+      });
+    }
+
+    const displayName = `Membership Apply - ${odooPlan} - ${name}`.slice(0, 120);
+
+    const createdIds = await odooCall(MEMBERSHIP_APPLICATION_MODEL, "create", {
+      vals_list: [
+        {
+          x_name: displayName,
+          x_studio_customer: user.partner_id,
+          [PLAN_FIELD]: odooPlan,
+          x_studio_name: name,
+          x_studio_phone: phone || false,
+          x_studio_email: email || false,
+          x_studio_status: "Requested",
+          x_studio_requested_at: formatOdooDatetime(),
+        },
+      ],
+    });
+
+    const applicationId = Array.isArray(createdIds) ? createdIds[0] : createdIds;
+
+    return success(res, {
+      message: "Membership application created",
+      application_id: applicationId,
+      status: "Requested",
+      plan: odooPlan,
+      reused: false,
+    });
+  } catch (err) {
+    return error(res, "Failed to create membership application", 500, getOdooError(err));
   }
 }
