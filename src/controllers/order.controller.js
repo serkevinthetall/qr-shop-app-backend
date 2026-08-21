@@ -7,6 +7,10 @@ import {
   getPricelistPricesForProducts,
   resolvePricelistForPartner,
 } from "../utils/membership-pricelist.js";
+import {
+  cartAlreadyHasDeliveryProduct,
+  resolveDeliveryFeeVariant,
+} from "../utils/delivery-fee.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -432,6 +436,26 @@ export async function createCheckout(req, res) {
           "You can't use the price that is lower than the coupon amount",
           400
         );
+      }
+    }
+
+    // Auto delivery fee from selected branch postal → x_delivery_fee.
+    // Additive: old apps unchanged; missing/unknown zip → no fee line.
+    // Coupon minimum still uses cart-only subtotal (above).
+    if (!cartAlreadyHasDeliveryProduct(resolvedVariants)) {
+      const shippingForFee = await readShippingPartner(shippingPartnerId);
+      const deliveryFee = await resolveDeliveryFeeVariant(shippingForFee?.zip);
+
+      if (deliveryFee?.productId) {
+        orderLines.push([
+          0,
+          0,
+          {
+            product_id: deliveryFee.productId,
+            product_uom_qty: 1,
+            price_unit: deliveryFee.listPrice,
+          },
+        ]);
       }
     }
 
