@@ -9,6 +9,8 @@ import {
 } from "../utils/membership-pricelist.js";
 import {
   cartAlreadyHasDeliveryProduct,
+  isDeliveryFeeWaived,
+  isDeliveryVariant,
   resolveDeliveryFeeVariant,
 } from "../utils/delivery-fee.js";
 
@@ -350,7 +352,10 @@ export async function createCheckout(req, res) {
 
     const orderLines = [];
     let cartSubtotal = 0;
-    const { pricelistId } = await resolvePricelistForPartner(partnerId);
+    const [{ pricelistId }, deliveryFeeWaived] = await Promise.all([
+      resolvePricelistForPartner(partnerId),
+      isDeliveryFeeWaived(partnerId),
+    ]);
     const resolvedVariants = [];
 
     for (const item of items) {
@@ -367,7 +372,16 @@ export async function createCheckout(req, res) {
         return error(res, `Product variant not found for product.template ID ${templateId}`, 400);
       }
 
+      // Pro/Premium/Shop: never keep a Delivery line the client may have sent.
+      if (deliveryFeeWaived && isDeliveryVariant(variant)) {
+        continue;
+      }
+
       resolvedVariants.push({ templateId, quantity, variant });
+    }
+
+    if (!resolvedVariants.length) {
+      return error(res, "Cart items are required", 400);
     }
 
     const priceByTemplate = pricelistId
@@ -440,9 +454,13 @@ export async function createCheckout(req, res) {
     }
 
     // Auto delivery fee from selected branch postal → x_delivery_fee.
+    // Waived for Active Pro/Premium or partner tag Shop (case-insensitive).
     // Additive: old apps unchanged; missing/unknown zip → no fee line.
     // Coupon minimum still uses cart-only subtotal (above).
-    if (!cartAlreadyHasDeliveryProduct(resolvedVariants)) {
+    if (
+      !deliveryFeeWaived &&
+      !cartAlreadyHasDeliveryProduct(resolvedVariants)
+    ) {
       const shippingForFee = await readShippingPartner(shippingPartnerId);
       const deliveryFee = await resolveDeliveryFeeVariant(shippingForFee?.zip);
 

@@ -1,4 +1,6 @@
 import { odooCall } from "../services/odoo.service.js";
+import { resolveMembershipTier } from "./membership-pricelist.js";
+import { getPartnerTagNames } from "./partner-tags.js";
 
 /** Odoo Studio model filled by the Yangon delivery-fee cron. */
 export const DELIVERY_FEE_MODEL = "x_delivery_fee";
@@ -8,6 +10,9 @@ export const DELIVERY_FEE_PRODUCT = "x_studio_delivery_product";
 export const DELIVERY_FEE_POSTAL = "x_studio_related_field_2e6_1k0hknmkg";
 export const TOWNSHIP_MODEL = "x_townships";
 export const TOWNSHIP_POSTAL = "x_studio_postal_code";
+
+/** Partner category tag that waives delivery (case-insensitive). */
+export const FREE_DELIVERY_PARTNER_TAG = "shop";
 
 /**
  * Kill switch: set AUTO_DELIVERY_FEE_ENABLED=false on Vercel to disable
@@ -27,13 +32,60 @@ export function normalizePostalCode(zip) {
   return String(zip).trim().replace(/\s+/g, "");
 }
 
+/** True when product display name is the Delivery fee SKU (not "Delivery Box…"). */
+export function isDeliveryProductName(name) {
+  const raw = String(name || "").trim();
+  const withoutCode = raw.replace(/^\[[^\]]*\]\s*/, "").trim().toLowerCase();
+  return withoutCode === "delivery";
+}
+
+export function isDeliveryVariant(variant) {
+  return isDeliveryProductName(variant?.name);
+}
+
 /** True if a cart line already looks like a Delivery fee product. */
 export function cartAlreadyHasDeliveryProduct(resolvedVariants) {
-  return (resolvedVariants || []).some(({ variant }) => {
-    const raw = String(variant?.name || "").trim();
-    const withoutCode = raw.replace(/^\[[^\]]*\]\s*/, "").trim().toLowerCase();
-    return withoutCode === "delivery";
-  });
+  return (resolvedVariants || []).some(({ variant }) => isDeliveryVariant(variant));
+}
+
+/**
+ * Free delivery for Active Pro/Premium, or partner tag Shop/shop only.
+ * Never throws — checkout continues with normal fee rules on failure.
+ */
+export async function isDeliveryFeeWaived(partnerId) {
+  if (!partnerId) {
+    return false;
+  }
+
+  try {
+    const [memberships, tags] = await Promise.all([
+      odooCall("x_membership", "search_read", {
+        domain: [
+          ["x_studio_customer", "=", partnerId],
+          ["x_studio_status", "=", "Active"],
+        ],
+        fields: ["id", "x_studio_membership_level", "x_studio_status"],
+        order: "x_studio_start_date desc",
+        limit: 1,
+      }),
+      getPartnerTagNames(partnerId),
+    ]);
+
+    const tier = resolveMembershipTier(memberships[0]?.x_studio_membership_level);
+    if (tier === "pro" || tier === "premium") {
+      return true;
+    }
+
+    return (tags || []).some(
+      (tag) => String(tag || "").trim().toLowerCase() === FREE_DELIVERY_PARTNER_TAG
+    );
+  } catch (err) {
+    console.warn(
+      "[delivery-fee] waive check failed; applying normal fee rules:",
+      err?.message || err
+    );
+    return false;
+  }
 }
 
 async function findFeeRowByPostal(postal) {
