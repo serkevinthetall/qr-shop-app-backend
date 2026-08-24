@@ -1,6 +1,7 @@
 import { odooCall } from "../services/odoo.service.js";
 import { resolveMembershipTier } from "./membership-pricelist.js";
 import { getPartnerTagNames } from "./partner-tags.js";
+import { normalizePartnerId } from "./partner-id.js";
 
 /** Odoo Studio model filled by the Yangon delivery-fee cron. */
 export const DELIVERY_FEE_MODEL = "x_delivery_fee";
@@ -53,8 +54,13 @@ export function cartAlreadyHasDeliveryProduct(resolvedVariants) {
  * Never throws — checkout continues with normal fee rules on failure.
  */
 export async function isDeliveryFeeWaived(partnerId) {
+  const detail = await getDeliveryFeeWaiveDetail(partnerId);
+  return detail.waived;
+}
+
+export async function getDeliveryFeeWaiveDetail(partnerId) {
   if (!partnerId) {
-    return false;
+    return { waived: false, reason: null, tier: null };
   }
 
   try {
@@ -73,33 +79,45 @@ export async function isDeliveryFeeWaived(partnerId) {
 
     const tier = resolveMembershipTier(memberships[0]?.x_studio_membership_level);
     if (tier === "pro" || tier === "premium") {
-      return true;
+      return { waived: true, reason: tier, tier };
     }
 
-    return (tags || []).some(
+    const hasShop = (tags || []).some(
       (tag) => String(tag || "").trim().toLowerCase() === FREE_DELIVERY_PARTNER_TAG
     );
+
+    if (hasShop) {
+      return { waived: true, reason: "shop", tier };
+    }
+
+    return { waived: false, reason: null, tier };
   } catch (err) {
     console.warn(
       "[delivery-fee] waive check failed; applying normal fee rules:",
       err?.message || err
     );
-    return false;
+    return { waived: false, reason: null, tier: null };
   }
 }
 
 async function findFeeRowByPostal(postal) {
-  const rows = await odooCall(DELIVERY_FEE_MODEL, "search_read", {
-    domain: [[DELIVERY_FEE_POSTAL, "=", postal]],
-    fields: ["id", DELIVERY_FEE_PRODUCT, DELIVERY_FEE_POSTAL, DELIVERY_FEE_TOWNSHIP],
-    limit: 1,
-  });
+  try {
+    const rows = await odooCall(DELIVERY_FEE_MODEL, "search_read", {
+      domain: [[DELIVERY_FEE_POSTAL, "=", postal]],
+      fields: ["id", DELIVERY_FEE_PRODUCT, DELIVERY_FEE_POSTAL, DELIVERY_FEE_TOWNSHIP],
+      limit: 1,
+    });
 
-  if (rows[0]) {
-    return rows[0];
+    if (rows[0]) {
+      return rows[0];
+    }
+  } catch (err) {
+    console.warn(
+      "[delivery-fee] postal related search failed; trying township fallback:",
+      err?.message || err
+    );
   }
 
-  // Fallback if related postal is not searchable: township → fee row
   const townships = await odooCall(TOWNSHIP_MODEL, "search_read", {
     domain: [[TOWNSHIP_POSTAL, "=", postal]],
     fields: ["id"],
@@ -177,13 +195,61 @@ export async function resolveDeliveryFeeVariant(zip) {
       name: variant.name || templates[0]?.name || "Delivery",
       listPrice,
       postal,
+      defaultCode: variant.default_code || null,
     };
   } catch (err) {
-    // Never block checkout if Studio fields/model are unavailable.
     console.warn(
       "[delivery-fee] lookup failed; skipping auto fee:",
       err?.message || err
     );
     return null;
   }
+}
+
+/**
+ * Quote delivery for app cart / checkout preview.
+ * Additive endpoint — old apps never call it.
+ */
+export async function quoteDeliveryFee({ partnerId, zip, addressId }) {
+  const waive = await getDeliveryFeeWaiveDetail(partnerId);
+  let postal = normalizePostalCode(zip);
+
+  if (!postal && addressId) {
+    const id = normalizePartnerId(addressId);
+    if (id) {
+      const partners = await odooCall("res.partner", "search_read", {
+        domain: [["id", "=", id]],
+        fields: ["id", "zip"],
+        limit: 1,
+      });
+      postal = normalizePostalCode(partners[0]?.zip);
+    }
+  }
+
+  if (waive.waived) {
+    return {
+      waived: true,
+      waive_reason: waive.reason,
+      zip: postal || null,
+      fee: null,
+    };
+  }
+
+  const fee = await resolveDeliveryFeeVariant(postal);
+
+  return {
+    waived: false,
+    waive_reason: null,
+    zip: postal || null,
+    fee: fee
+      ? {
+          template_id: fee.templateId,
+          product_id: fee.productId,
+          name: fee.name,
+          list_price: fee.listPrice,
+          postal: fee.postal,
+          default_code: fee.defaultCode,
+        }
+      : null,
+  };
 }

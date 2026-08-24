@@ -9,6 +9,7 @@ import membershipRoutes from "./routes/membership.routes.js";
 import orderRoutes from "./routes/order.routes.js";
 import addressRoutes from "./routes/address.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
+import deliveryFeeRoutes from "./routes/delivery-fee.routes.js";
 
 dotenv.config();
 
@@ -50,6 +51,7 @@ app.use("/api", productRoutes);
 app.use("/api/membership", membershipRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/addresses", addressRoutes);
+app.use("/api/delivery-fee", deliveryFeeRoutes);
 app.use("/api/notifications", notificationRoutes);
 
 app.use((req, res) => {

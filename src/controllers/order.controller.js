@@ -8,7 +8,6 @@ import {
   resolvePricelistForPartner,
 } from "../utils/membership-pricelist.js";
 import {
-  cartAlreadyHasDeliveryProduct,
   isDeliveryFeeWaived,
   isDeliveryVariant,
   resolveDeliveryFeeVariant,
@@ -372,8 +371,9 @@ export async function createCheckout(req, res) {
         return error(res, `Product variant not found for product.template ID ${templateId}`, 400);
       }
 
-      // Pro/Premium/Shop: never keep a Delivery line the client may have sent.
-      if (deliveryFeeWaived && isDeliveryVariant(variant)) {
+      // Always drop client Delivery lines; backend adds the correct fee (or none).
+      // Pro/Premium/Shop waive → no fee. Others → fee from selected branch zip.
+      if (isDeliveryVariant(variant)) {
         continue;
       }
 
@@ -455,12 +455,9 @@ export async function createCheckout(req, res) {
 
     // Auto delivery fee from selected branch postal → x_delivery_fee.
     // Waived for Active Pro/Premium or partner tag Shop (case-insensitive).
-    // Additive: old apps unchanged; missing/unknown zip → no fee line.
+    // Cart Delivery lines are stripped above so branch changes never keep a stale fee.
     // Coupon minimum still uses cart-only subtotal (above).
-    if (
-      !deliveryFeeWaived &&
-      !cartAlreadyHasDeliveryProduct(resolvedVariants)
-    ) {
+    if (!deliveryFeeWaived) {
       const shippingForFee = await readShippingPartner(shippingPartnerId);
       const deliveryFee = await resolveDeliveryFeeVariant(shippingForFee?.zip);
 
