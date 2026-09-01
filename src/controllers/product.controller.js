@@ -184,7 +184,12 @@ export async function getProductImage(req, res) {
 
 export async function getProducts(req, res) {
   try {
-    const limit = Number(req.query.limit || 75);
+    const requestedLimit = Number(req.query.limit);
+    // Old store builds still send limit=50; always return at least 75.
+    const limit = Math.max(
+      75,
+      Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : 75,
+    );
     const offset = Number(req.query.offset || 0);
     const categoryId = Number(req.query.category_id || 0);
 
