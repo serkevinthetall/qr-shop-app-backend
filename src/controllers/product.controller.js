@@ -184,7 +184,7 @@ export async function getProductImage(req, res) {
 
 export async function getProducts(req, res) {
   try {
-    const limit = Number(req.query.limit || 20);
+    const limit = Number(req.query.limit || 75);
     const offset = Number(req.query.offset || 0);
     const categoryId = Number(req.query.category_id || 0);
 
