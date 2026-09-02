@@ -12,6 +12,13 @@ import {
   isDeliveryVariant,
   resolveDeliveryFeeVariant,
 } from "../utils/delivery-fee.js";
+import {
+  attachDeliverySummary,
+  buildDeliveryBuckets,
+  ORDER_DETAIL_FIELDS,
+  ORDER_LINE_FIELDS,
+  ORDER_LIST_FIELDS,
+} from "../utils/order-delivery.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -600,6 +607,62 @@ export async function createCheckout(req, res) {
   }
 }
 
+async function loadOrderLinesByOrderIds(orderIds) {
+  const uniqueIds = [...new Set((orderIds || []).filter((id) => typeof id === "number" && id > 0))];
+
+  if (!uniqueIds.length) {
+    return new Map();
+  }
+
+  try {
+    const lines = await odooCall("sale.order.line", "search_read", {
+      domain: [["order_id", "in", uniqueIds]],
+      fields: [...ORDER_LINE_FIELDS, "order_id"],
+      limit: Math.max(500, uniqueIds.length * 40),
+    });
+
+    const byOrderId = new Map();
+
+    for (const line of lines) {
+      const orderId = Array.isArray(line.order_id) ? line.order_id[0] : Number(line.order_id);
+
+      if (!orderId) {
+        continue;
+      }
+
+      const bucket = byOrderId.get(orderId) || [];
+      bucket.push(line);
+      byOrderId.set(orderId, bucket);
+    }
+
+    return byOrderId;
+  } catch (err) {
+    console.log("Order delivery line enrichment failed:", getOdooError(err));
+    return new Map();
+  }
+}
+
+async function readSaleOrders(domain, fields, extra = {}) {
+  try {
+    return await odooCall("sale.order", "search_read", {
+      domain,
+      fields,
+      ...extra,
+    });
+  } catch (err) {
+    // Older / stripped Odoo DBs may lack invoice_status; keep orders working.
+    const message = String(getOdooError(err) || "");
+    if (fields.includes("invoice_status") && /invoice_status/i.test(message)) {
+      return odooCall("sale.order", "search_read", {
+        domain,
+        fields: fields.filter((field) => field !== "invoice_status"),
+        ...extra,
+      });
+    }
+    throw err;
+  }
+}
+
 export async function getOrders(req, res) {
   try {
     const user = getAuthUser(req);
@@ -611,26 +674,18 @@ export async function getOrders(req, res) {
     if (!partnerId) return error(res, "No partner linked to this user", 400);
 
     const orders = await attachShippingAddresses(
-      await odooCall("sale.order", "search_read", {
-        domain: [["partner_id", "=", partnerId]],
-        fields: [
-          "id",
-          "name",
-          "state",
-          "amount_total",
-          "date_order",
-          "partner_id",
-          "partner_shipping_id",
-          "order_line",
-          "x_studio_preferred_delivery_date",
-          "x_studio_delivery_notes",
-        ],
+      await readSaleOrders([["partner_id", "=", partnerId]], ORDER_LIST_FIELDS, {
         order: "date_order desc",
         limit: 50,
       })
     );
 
-    return success(res, { orders });
+    const linesByOrderId = await loadOrderLinesByOrderIds(orders.map((order) => order.id));
+    const enrichedOrders = orders.map((order) =>
+      attachDeliverySummary(order, linesByOrderId.get(order.id) || [])
+    );
+
+    return success(res, { orders: enrichedOrders });
   } catch (err) {
     return error(res, "Failed to get orders", 500, getOdooError(err));
   }
@@ -649,45 +704,54 @@ export async function getOrderById(req, res) {
     if (!partnerId) return error(res, "No partner linked to this user", 400);
 
     const orders = await attachShippingAddresses(
-      await odooCall("sale.order", "search_read", {
-        domain: [
+      await readSaleOrders(
+        [
           ["id", "=", orderId],
           ["partner_id", "=", partnerId],
         ],
-        fields: [
-          "id",
-          "name",
-          "state",
-          "amount_total",
-          "date_order",
-          "partner_id",
-          "partner_shipping_id",
-          "order_line",
-          "note",
-          "x_studio_preferred_delivery_date",
-          "x_studio_delivery_notes",
-        ],
-        limit: 1,
-      })
+        ORDER_DETAIL_FIELDS,
+        { limit: 1 }
+      )
     );
 
     if (!orders.length) return error(res, "Order not found", 404);
 
-    const lines = await odooCall("sale.order.line", "search_read", {
-      domain: [["order_id", "=", orderId]],
-      fields: [
-        "id",
-        "product_id",
-        "name",
-        "product_uom_qty",
-        "price_unit",
-        "price_subtotal",
-      ],
+    let lines = [];
+
+    try {
+      lines = await odooCall("sale.order.line", "search_read", {
+        domain: [["order_id", "=", orderId]],
+        fields: ORDER_LINE_FIELDS,
+      });
+    } catch (err) {
+      console.log("Order line delivery fields failed, using basic lines:", getOdooError(err));
+      lines = await odooCall("sale.order.line", "search_read", {
+        domain: [["order_id", "=", orderId]],
+        fields: ["id", "product_id", "name", "product_uom_qty", "price_unit", "price_subtotal"],
+      });
+    }
+
+    const buckets = buildDeliveryBuckets(lines);
+    const enrichedLines = lines.map((line) => {
+      const mapped = buckets.productLines.find((item) => item.id === line.id);
+
+      if (!mapped) {
+        return line;
+      }
+
+      return {
+        ...line,
+        qty_ordered: mapped.qty_ordered,
+        qty_delivered: mapped.qty_delivered,
+        qty_pending: mapped.qty_pending,
+      };
     });
 
     return success(res, {
-      order: orders[0],
-      lines,
+      order: attachDeliverySummary(orders[0], lines),
+      lines: enrichedLines,
+      delivering_now: buckets.delivering_now,
+      coming_later: buckets.coming_later,
     });
   } catch (err) {
     return error(res, "Failed to get order", 500, getOdooError(err));
