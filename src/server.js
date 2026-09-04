@@ -27,15 +27,20 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/app-config", (req, res) => {
+  // Shared fallback stays low so a single APP_MIN_VERSION cannot force Android
+  // users onto an iOS-only marketing version.
   const minVersion = String(process.env.APP_MIN_VERSION || "1.0.0").trim() || "1.0.0";
+  // Platform mins: iOS App Store 1.3, Play Production 1.0.3 (code 21).
+  const minIosVersion =
+    String(process.env.APP_MIN_IOS_VERSION || "1.3").trim() || "1.3";
+  const minAndroidVersion =
+    String(process.env.APP_MIN_ANDROID_VERSION || "1.0.3").trim() || "1.0.3";
 
   res.json({
     success: true,
     min_version: minVersion,
-    min_ios_version:
-      String(process.env.APP_MIN_IOS_VERSION || minVersion).trim() || minVersion,
-    min_android_version:
-      String(process.env.APP_MIN_ANDROID_VERSION || minVersion).trim() || minVersion,
+    min_ios_version: minIosVersion,
+    min_android_version: minAndroidVersion,
     ios_store_url: String(process.env.IOS_STORE_URL || "").trim(),
     android_store_url:
       String(
