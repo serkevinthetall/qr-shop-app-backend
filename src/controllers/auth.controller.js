@@ -4,6 +4,46 @@ import { normalizePhone } from "../utils/phone.js";
 import { odooCall, odooAuthenticate } from "../services/odoo.service.js";
 import { createToken } from "../services/token.service.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
+import {
+  clearLoginAttempts,
+  getClientIp,
+  getLoginAttemptKey,
+  getLoginLockStatus,
+  recordLoginFailure,
+} from "../utils/login-rate-limit.js";
+
+const GENERIC_LOGIN_ERROR = "Email or password is incorrect.";
+
+function rejectLocked(res, result) {
+  const retryAfterSeconds = result.retryAfterSeconds || 60;
+  res.setHeader("Retry-After", String(retryAfterSeconds));
+  return error(res, GENERIC_LOGIN_ERROR, 429, {
+    code: "LOGIN_LOCKED",
+    retry_after_seconds: retryAfterSeconds,
+    lock_minutes: result.lockMinutes || Math.ceil(retryAfterSeconds / 60),
+    next_lock_minutes: result.nextLockMinutes || 60,
+  });
+}
+
+function rejectInvalidLogin(res, attemptKey) {
+  const result = recordLoginFailure(attemptKey);
+
+  if (result.locked) {
+    return rejectLocked(res, result);
+  }
+
+  if (result.warn) {
+    return error(res, GENERIC_LOGIN_ERROR, 401, {
+      code: "LOGIN_WARNING",
+      remaining_attempts_before_lock: result.remainingAttemptsBeforeLock,
+      next_lock_minutes: result.nextLockMinutes,
+    });
+  }
+
+  return error(res, GENERIC_LOGIN_ERROR, 401, {
+    code: "INVALID_CREDENTIALS",
+  });
+}
 
 export async function login(req, res) {
   try {
@@ -12,6 +52,13 @@ export async function login(req, res) {
 
     if (!loginInput || !password) {
       return error(res, "Email/phone and password are required", 400);
+    }
+
+    const attemptKey = getLoginAttemptKey(getClientIp(req), loginInput);
+    const lockStatus = getLoginLockStatus(attemptKey);
+
+    if (lockStatus.locked) {
+      return rejectLocked(res, lockStatus);
     }
 
     let odooLogin = loginInput;
@@ -27,13 +74,13 @@ export async function login(req, res) {
       });
 
       if (!partners.length) {
-        return error(res, "Phone number not found", 404);
+        return rejectInvalidLogin(res, attemptKey);
       }
 
       partner = partners[0];
 
       if (!partner.email) {
-        return error(res, "This customer has no email login in Odoo", 400);
+        return rejectInvalidLogin(res, attemptKey);
       }
 
       odooLogin = partner.email;
@@ -42,8 +89,10 @@ export async function login(req, res) {
     const user = await odooAuthenticate(odooLogin, password);
 
     if (!user) {
-      return error(res, "Wrong login or password", 401);
+      return rejectInvalidLogin(res, attemptKey);
     }
+
+    clearLoginAttempts(attemptKey);
 
     const partnerId =
       normalizePartnerId(user.partner_id) ??
@@ -67,7 +116,8 @@ export async function login(req, res) {
       },
     });
   } catch (err) {
-    return error(res, "Login failed", 500, err.message);
+    console.error("Login failed:", err.message);
+    return error(res, "Login failed", 500);
   }
 }
 
