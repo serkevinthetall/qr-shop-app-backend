@@ -3,6 +3,11 @@
   publish = "public"
   functions = "netlify/functions"
 
+# Store URLs are public links, not secrets — Netlify flagged the Play Store
+# fallback string in src/server.js matching ANDROID_STORE_URL env.
+[build.environment]
+  SECRETS_SCAN_OMIT_KEYS = "ANDROID_STORE_URL,IOS_STORE_URL"
+
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
