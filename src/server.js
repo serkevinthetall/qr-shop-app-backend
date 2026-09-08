@@ -68,8 +68,8 @@ app.use((req, res) => {
 
 export default app;
 
-// Local / traditional hosting only — Vercel invokes the exported app.
-if (!process.env.VERCEL) {
+// Local / traditional hosting only — Vercel and Netlify invoke the exported app.
+if (!process.env.VERCEL && !process.env.NETLIFY) {
   const PORT = process.env.PORT || 10000;
 
   app.listen(PORT, () => {
