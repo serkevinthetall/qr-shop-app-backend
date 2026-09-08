@@ -5,12 +5,23 @@ import { fileURLToPath } from "url";
 import { normalizePushLanguage } from "../utils/push-i18n.js";
 import { odooCall } from "./odoo.service.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STORE_PATH = path.join(__dirname, "../../data/push-tokens.json");
+function resolveModuleDir() {
+  try {
+    // ESM (local / Vercel). Netlify's CJS bundle empties import.meta.url.
+    if (typeof import.meta !== "undefined" && import.meta?.url) {
+      return path.dirname(fileURLToPath(import.meta.url));
+    }
+  } catch {
+    // fall through
+  }
+  return process.cwd();
+}
+
+const STORE_PATH = path.join(resolveModuleDir(), "../../data/push-tokens.json");
 const PARTNER_FIELD =
   process.env.PUSH_TOKEN_PARTNER_FIELD || "x_studio_expo_push_token";
-// Vercel filesystem is ephemeral/read-only — Odoo is the source of truth there.
-const FILE_STORE_ENABLED = !process.env.VERCEL;
+// Serverless filesystems are ephemeral/read-only — Odoo is the source of truth.
+const FILE_STORE_ENABLED = !process.env.VERCEL && !process.env.NETLIFY;
 const MAX_TOKENS_PER_PARTNER = Number(process.env.PUSH_TOKEN_MAX_PER_PARTNER || 5);
 
 function isValidExpoToken(token) {
