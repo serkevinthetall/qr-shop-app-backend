@@ -20,8 +20,12 @@ function resolveModuleDir() {
 const STORE_PATH = path.join(resolveModuleDir(), "../../data/push-tokens.json");
 const PARTNER_FIELD =
   process.env.PUSH_TOKEN_PARTNER_FIELD || "x_studio_expo_push_token";
-// Serverless filesystems are ephemeral/read-only — Odoo is the source of truth.
-const FILE_STORE_ENABLED = !process.env.VERCEL && !process.env.NETLIFY;
+// Serverless (Vercel / Netlify / Lambda) has a read-only FS — Odoo is source of truth.
+const FILE_STORE_ENABLED =
+  !process.env.VERCEL &&
+  !process.env.NETLIFY &&
+  !process.env.AWS_LAMBDA_FUNCTION_NAME &&
+  process.env.PUSH_TOKEN_FILE_STORE !== "0";
 const MAX_TOKENS_PER_PARTNER = Number(process.env.PUSH_TOKEN_MAX_PER_PARTNER || 5);
 
 function isValidExpoToken(token) {
@@ -170,8 +174,13 @@ async function writeFileStore(store) {
     return;
   }
 
-  await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
-  await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
+  try {
+    await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
+    await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
+  } catch (err) {
+    // Never fail API requests because of local FS (e.g. read-only serverless).
+    console.warn("Local push token file write skipped:", err.message);
+  }
 }
 
 async function writeOdooDevices(partnerId, devices) {
@@ -347,6 +356,7 @@ export async function removePushToken(partnerId, expoPushToken = null) {
 
     await writeOdooDevices(partnerId, odooNext);
   } catch (err) {
+    // Prefer succeeding the client call; token may remain until next register.
     console.warn(
       "Odoo push token clear failed; removed from local file store only:",
       err.message

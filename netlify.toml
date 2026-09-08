@@ -7,6 +7,8 @@
 # fallback string in src/server.js matching ANDROID_STORE_URL env.
 [build.environment]
   SECRETS_SCAN_OMIT_KEYS = "ANDROID_STORE_URL,IOS_STORE_URL"
+  # Force Odoo-only push tokens on Netlify (read-only function FS).
+  PUSH_TOKEN_FILE_STORE = "0"
 
 [functions]
   directory = "netlify/functions"
