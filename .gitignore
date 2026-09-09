@@ -6,3 +6,6 @@ node_modules/
 *.log
 npm-debug.log*
 data/push-tokens.json
+
+# Private operational notes — never publish
+docs/
