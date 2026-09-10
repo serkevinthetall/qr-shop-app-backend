@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { getPartnerTagNames } from "../utils/partner-tags.js";
@@ -6,7 +7,7 @@ import { normalizePhone } from "../utils/phone.js";
 
 export async function getProfile(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) {
       return error(res, "Unauthorized", 401);
@@ -46,13 +47,14 @@ export async function getProfile(req, res) {
         : null,
     });
   } catch (err) {
-    return error(res, "Failed to get profile", 500, err.message);
+    logServerError("Failed to get profile", err);
+    return error(res, "Failed to get profile", 500);
   }
 }
 
 export async function updateProfile(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) {
       return error(res, "Unauthorized", 401);
@@ -105,6 +107,7 @@ export async function updateProfile(req, res) {
       message: "Profile updated successfully",
     });
   } catch (err) {
-    return error(res, "Failed to update profile", 500, err.message);
+    logServerError("Failed to update profile", err);
+    return error(res, "Failed to update profile", 500);
   }
 }

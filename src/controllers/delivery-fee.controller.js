@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { normalizePartnerId } from "../utils/partner-id.js";
 import { quoteDeliveryFee } from "../utils/delivery-fee.js";
@@ -15,7 +16,7 @@ import {
  */
 export async function getDeliveryFee(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) {
       return error(res, "Unauthorized", 401);
@@ -62,11 +63,7 @@ export async function getDeliveryFee(req, res) {
       ...quote,
     });
   } catch (err) {
-    return error(
-      res,
-      "Could not resolve delivery fee",
-      500,
-      err?.message || err
-    );
+    logServerError("Could not resolve delivery fee", err);
+    return error(res, "Could not resolve delivery fee", 500);
   }
 }

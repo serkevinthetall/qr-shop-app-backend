@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import dotenv from "dotenv";
 
 import authRoutes from "./routes/auth.routes.js";
@@ -14,6 +15,15 @@ import deliveryFeeRoutes from "./routes/delivery-fee.routes.js";
 dotenv.config();
 
 const app = express();
+
+// JSON API: no HTML CSP needed. Keep standard hardening headers and hide Express.
+app.disable("x-powered-by");
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));

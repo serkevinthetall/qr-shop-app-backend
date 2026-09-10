@@ -1,20 +1,14 @@
-import { verifyToken } from "../services/token.service.js";
+import { extractBearerToken, verifyAccessToken } from "../services/token.service.js";
 import { normalizePartnerId } from "../utils/partner-id.js";
 
-export function getAuthUser(req) {
-  const authHeader = req.headers.authorization || "";
-
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authHeader.replace("Bearer ", "").trim();
+export async function getAuthUser(req) {
+  const token = extractBearerToken(req);
 
   if (!token) {
     return null;
   }
 
-  const user = verifyToken(token);
+  const user = await verifyAccessToken(token);
 
   if (!user) {
     return null;
@@ -26,16 +20,24 @@ export function getAuthUser(req) {
   };
 }
 
-export function requireAuth(req, res, next) {
-  const user = getAuthUser(req);
+export async function requireAuth(req, res, next) {
+  try {
+    const user = await getAuthUser(req);
 
-  if (!user) {
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    req.user = user;
+    return next();
+  } catch (err) {
+    console.error("requireAuth failed:", err.message);
     return res.status(401).json({
       success: false,
       message: "Unauthorized",
     });
   }
-
-  req.user = user;
-  next();
 }

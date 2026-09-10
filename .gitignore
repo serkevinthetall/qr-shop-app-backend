@@ -9,3 +9,4 @@ data/push-tokens.json
 
 # Private operational notes — never publish
 docs/
+.env*

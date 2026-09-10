@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { resolveShippingPartnerId } from "../utils/partner-scope.js";
@@ -231,6 +232,13 @@ function parseItems(rawItems) {
 async function createAttachment(orderId, file) {
   if (!file) return null;
 
+  const allowed = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+  const mimetype = String(file.mimetype || "").toLowerCase();
+
+  if (!allowed.has(mimetype)) {
+    throw new Error("INVALID_PAYMENT_SCREENSHOT_TYPE");
+  }
+
   const base64File = file.buffer.toString("base64");
 
   const createdIds = await odooCall("ir.attachment", "create", {
@@ -241,7 +249,7 @@ async function createAttachment(orderId, file) {
         datas: base64File,
         res_model: "sale.order",
         res_id: orderId,
-        mimetype: file.mimetype || "image/jpeg",
+        mimetype,
       },
     ],
   });
@@ -308,7 +316,7 @@ async function applyCouponToOrder(orderId, code) {
 
 export async function createCheckout(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
 
@@ -518,18 +526,14 @@ export async function createCheckout(req, res) {
         await applyCouponToOrder(orderId, coupon_code);
       } catch (couponErr) {
         await odooCall("sale.order", "unlink", { args: [[orderId]] }).catch(() => {});
-        return error(
-          res,
-          "Coupon could not be applied",
-          400,
-          getOdooError(couponErr)
-        );
+        logServerError("Coupon could not be applied", couponErr);
+        return error(res, "Coupon could not be applied", 400, { code: "COUPON_APPLY_FAILED" });
       }
     }
 
     if (coupon_code) {
-      // A used coupon must be consumed. Confirming the order triggers the Odoo
-      // automation that flips the membership coupon ticket status to "Used".
+      // Coupon checkout confirms to Sale Order so Odoo can mark the membership
+      // coupon ticket Used. No-coupon checkout stays Quotation Sent.
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
       });
@@ -603,7 +607,8 @@ export async function createCheckout(req, res) {
     });
   } catch (err) {
     console.log("Checkout Odoo Error:", getOdooError(err));
-    return error(res, "Checkout failed", 500, getOdooError(err));
+    logServerError("Checkout failed", err);
+    return error(res, "Checkout failed", 500);
   }
 }
 
@@ -665,7 +670,7 @@ async function readSaleOrders(domain, fields, extra = {}) {
 
 export async function getOrders(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
 
@@ -687,13 +692,14 @@ export async function getOrders(req, res) {
 
     return success(res, { orders: enrichedOrders });
   } catch (err) {
-    return error(res, "Failed to get orders", 500, getOdooError(err));
+    logServerError("Failed to get orders", err);
+    return error(res, "Failed to get orders", 500);
   }
 }
 
 export async function getOrderById(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     const orderId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
@@ -754,13 +760,14 @@ export async function getOrderById(req, res) {
       coming_later: buckets.coming_later,
     });
   } catch (err) {
-    return error(res, "Failed to get order", 500, getOdooError(err));
+    logServerError("Failed to get order", err);
+    return error(res, "Failed to get order", 500);
   }
 }
 
 export async function reorder(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     const oldOrderId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
@@ -849,6 +856,7 @@ export async function reorder(req, res) {
       order: newOrders[0] || null,
     });
   } catch (err) {
-    return error(res, "Reorder failed", 500, getOdooError(err));
+    logServerError("Reorder failed", err);
+    return error(res, "Reorder failed", 500);
   }
 }

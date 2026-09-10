@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { normalizePhone, getPhoneSearchTail, phonesMatch } from "../utils/phone.js";
@@ -94,7 +95,7 @@ async function findExistingPartnerWithPhone(phone, excludePartnerIds = []) {
 
 export async function getAddressMeta(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
 
@@ -111,13 +112,14 @@ export async function getAddressMeta(req, res) {
       states,
     });
   } catch (err) {
-    return error(res, "Failed to get address meta", 500, getOdooError(err));
+    logServerError("Failed to get address meta", err);
+    return error(res, "Failed to get address meta", 500);
   }
 }
 
 export async function getAddresses(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     const partnerId = normalizePartnerId(user.partner_id);
@@ -128,13 +130,14 @@ export async function getAddresses(req, res) {
 
     return success(res, { addresses });
   } catch (err) {
-    return error(res, "Failed to get addresses", 500, getOdooError(err));
+    logServerError("Failed to get addresses", err);
+    return error(res, "Failed to get addresses", 500);
   }
 }
 
 export async function createAddress(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
 
@@ -203,13 +206,14 @@ export async function createAddress(req, res) {
       address_id: addressId,
     });
   } catch (err) {
-    return error(res, "Failed to create address", 500, getOdooError(err));
+    logServerError("Failed to create address", err);
+    return error(res, "Failed to create address", 500);
   }
 }
 
 export async function updateAddress(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     const addressId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
@@ -264,13 +268,14 @@ export async function updateAddress(req, res) {
       message: "Address updated successfully",
     });
   } catch (err) {
-    return error(res, "Failed to update address", 500, getOdooError(err));
+    logServerError("Failed to update address", err);
+    return error(res, "Failed to update address", 500);
   }
 }
 
 export async function deleteAddress(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     const addressId = Number(req.params.id);
 
     if (!user) return error(res, "Unauthorized", 401);
@@ -295,6 +300,7 @@ export async function deleteAddress(req, res) {
       message: "Address deleted successfully",
     });
   } catch (err) {
-    return error(res, "Failed to delete address", 500, getOdooError(err));
+    logServerError("Failed to delete address", err);
+    return error(res, "Failed to delete address", 500);
   }
 }

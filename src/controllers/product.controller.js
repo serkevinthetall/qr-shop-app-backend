@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import {
@@ -41,7 +42,7 @@ async function applyJustForYouDomain(req, domain) {
     return { ok: true, domain };
   }
 
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
 
   if (!user) {
     return { ok: false, status: 401, message: "Unauthorized" };
@@ -107,8 +108,8 @@ async function formatProducts(products, { fastRibbons = false, partnerId = null 
   return priced.map((product, index) => formatProduct(product, ribbons[index]));
 }
 
-function getRequestPartnerId(req) {
-  const user = getAuthUser(req);
+async function getRequestPartnerId(req) {
+  const user = await getAuthUser(req);
   return user?.partner_id || null;
 }
 
@@ -178,7 +179,8 @@ export async function getProductImage(req, res) {
 
     return res.send(buffer);
   } catch (err) {
-    return error(res, "Failed to load product image", 500, getOdooError(err));
+    logServerError("Failed to load product image", err);
+    return error(res, "Failed to load product image", 500);
   }
 }
 
@@ -227,14 +229,15 @@ export async function getProducts(req, res) {
     return success(res, {
       products: await formatProducts(products, {
         fastRibbons: true,
-        partnerId: getRequestPartnerId(req),
+        partnerId: await getRequestPartnerId(req),
       }),
       limit,
       offset,
       count: products.length,
     });
   } catch (err) {
-    return error(res, "Failed to get products", 500, getOdooError(err));
+    logServerError("Failed to get products", err);
+    return error(res, "Failed to get products", 500);
   }
 }
 
@@ -291,7 +294,7 @@ export async function getProductById(req, res) {
     ]);
 
     const similarProducts = similarProductsResult || [];
-    const partnerId = getRequestPartnerId(req);
+    const partnerId = await getRequestPartnerId(req);
 
     const [[pricedMain], pricedSimilar] = await Promise.all([
       applyMembershipPricesToProducts([withTags[0] || product], partnerId),
@@ -307,7 +310,8 @@ export async function getProductById(req, res) {
       ),
     });
   } catch (err) {
-    return error(res, "Failed to get product", 500, getOdooError(err));
+    logServerError("Failed to get product", err);
+    return error(res, "Failed to get product", 500);
   }
 }
 
@@ -351,12 +355,13 @@ export async function searchProducts(req, res) {
     return success(res, {
       products: await formatProducts(products, {
         fastRibbons: true,
-        partnerId: getRequestPartnerId(req),
+        partnerId: await getRequestPartnerId(req),
       }),
       count: products.length,
     });
   } catch (err) {
-    return error(res, "Failed to search products", 500, getOdooError(err));
+    logServerError("Failed to search products", err);
+    return error(res, "Failed to search products", 500);
   }
 }
 
@@ -434,7 +439,7 @@ async function loadCategoriesFromOdoo() {
 
 export async function getProductPrices(req, res) {
   try {
-    const partnerId = getRequestPartnerId(req);
+    const partnerId = await getRequestPartnerId(req);
     const sinceVersion = String(req.query.version || "").trim();
     const snapshot = await getMembershipProductPriceSnapshot(
       partnerId,
@@ -443,7 +448,8 @@ export async function getProductPrices(req, res) {
 
     return success(res, snapshot);
   } catch (err) {
-    return error(res, "Failed to get product prices", 500, getOdooError(err));
+    logServerError("Failed to get product prices", err);
+    return error(res, "Failed to get product prices", 500);
   }
 }
 
@@ -470,7 +476,8 @@ export async function getCategories(req, res) {
       count: filteredCategories.length,
     });
   } catch (err) {
-    return error(res, "Failed to get categories", 500, getOdooError(err));
+    logServerError("Failed to get categories", err);
+    return error(res, "Failed to get categories", 500);
   }
 }
 

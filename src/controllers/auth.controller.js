@@ -2,7 +2,8 @@ import { success, error } from "../utils/response.js";
 import { normalizePartnerId } from "../utils/partner-id.js";
 import { normalizePhone } from "../utils/phone.js";
 import { odooCall, odooAuthenticate } from "../services/odoo.service.js";
-import { createToken } from "../services/token.service.js";
+import { createToken, extractBearerToken } from "../services/token.service.js";
+import { revokeAccessToken } from "../services/token-revoke.store.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import {
   clearLoginAttempts,
@@ -25,8 +26,8 @@ function rejectLocked(res, result) {
   });
 }
 
-function rejectInvalidLogin(res, attemptKey) {
-  const result = recordLoginFailure(attemptKey);
+async function rejectInvalidLogin(res, attemptKey) {
+  const result = await recordLoginFailure(attemptKey);
 
   if (result.locked) {
     return rejectLocked(res, result);
@@ -55,7 +56,7 @@ export async function login(req, res) {
     }
 
     const attemptKey = getLoginAttemptKey(getClientIp(req), loginInput);
-    const lockStatus = getLoginLockStatus(attemptKey);
+    const lockStatus = await getLoginLockStatus(attemptKey);
 
     if (lockStatus.locked) {
       return rejectLocked(res, lockStatus);
@@ -92,7 +93,7 @@ export async function login(req, res) {
       return rejectInvalidLogin(res, attemptKey);
     }
 
-    clearLoginAttempts(attemptKey);
+    await clearLoginAttempts(attemptKey);
 
     const partnerId =
       normalizePartnerId(user.partner_id) ??
@@ -122,7 +123,7 @@ export async function login(req, res) {
 }
 
 export async function me(req, res) {
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
 
   if (!user) {
     return error(res, "Unauthorized", 401);
@@ -132,6 +133,21 @@ export async function me(req, res) {
 }
 
 export async function logout(req, res) {
+  const token = extractBearerToken(req);
+
+  if (!token) {
+    return error(res, "Unauthorized", 401);
+  }
+
+  // Must be a currently valid session to revoke (prevents anonymous denylist spam).
+  const user = await getAuthUser(req);
+
+  if (!user) {
+    return error(res, "Unauthorized", 401);
+  }
+
+  await revokeAccessToken(token);
+
   return success(res, {
     message: "Logged out successfully",
   });
@@ -139,7 +155,7 @@ export async function logout(req, res) {
 
 export async function changePassword(req, res) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
 
     if (!authUser) {
       return error(res, "Unauthorized", 401);
@@ -180,6 +196,7 @@ export async function changePassword(req, res) {
       message: "Password changed successfully",
     });
   } catch (err) {
-    return error(res, "Failed to change password", 500, err.message);
+    console.error("Failed to change password:", err.message);
+    return error(res, "Failed to change password", 500);
   }
 }

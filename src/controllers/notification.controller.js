@@ -1,4 +1,5 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import {
@@ -22,6 +23,7 @@ import {
   isBlockedRibbonName,
   isNotifiableRibbonProduct,
 } from "../utils/product-filters.js";
+import { timingSafeEqual } from "crypto";
 
 const NEW_PRODUCT_LIMIT = 20;
 const NEW_COUPON_LIMIT = 20;
@@ -29,6 +31,10 @@ const NEW_COUPON_LIMIT = 20;
 // Local timezone offset used to decide what "today" means. Odoo stores
 // create_date in UTC; Myanmar is UTC+6:30 (390 minutes) with no DST.
 const LOCAL_TZ_OFFSET_MINUTES = Number(process.env.NOTIFY_TZ_OFFSET_MINUTES || 390);
+
+/** Dedupe identical product pushes (same id+ribbon) to limit broadcast amplification. */
+const PRODUCT_PUSH_DEDUPE_MS = Number(process.env.PRODUCT_PUSH_DEDUPE_MS || 120000);
+const recentProductPushes = new Map();
 
 function getOdooError(err) {
   return (
@@ -59,6 +65,19 @@ function getStartOfTodayUtc() {
   return toOdooDatetime(new Date(local.getTime() - offsetMs));
 }
 
+function secretsEqual(provided, expected) {
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(String(expected));
+  if (a.length !== b.length) {
+    return false;
+  }
+  try {
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 function verifyWebhookSecret(req) {
   const secret = String(process.env.ODOO_WEBHOOK_SECRET || "").trim();
 
@@ -66,13 +85,45 @@ function verifyWebhookSecret(req) {
     return { ok: false, reason: "missing_server_secret" };
   }
 
-  const provided = String(req.query.secret || req.headers["x-webhook-secret"] || "").trim();
+  // Prefer header. Query ?secret= still accepted so existing Odoo automation
+  // URLs keep working — migrate Odoo to x-webhook-secret when convenient.
+  const headerSecret = String(req.headers["x-webhook-secret"] || "").trim();
+  const querySecret = String(req.query.secret || "").trim();
+  const provided = headerSecret || querySecret;
 
-  if (!provided || provided !== secret) {
+  if (!provided || !secretsEqual(provided, secret)) {
     return { ok: false, reason: "bad_secret" };
   }
 
+  if (!headerSecret && querySecret) {
+    console.warn(
+      "Webhook authenticated via ?secret= query — prefer x-webhook-secret header"
+    );
+  }
+
   return { ok: true, reason: null };
+}
+
+function shouldSkipDuplicateProductPush(productId, ribbonName) {
+  const key = `${productId}|${String(ribbonName || "").trim().toLowerCase()}`;
+  const now = Date.now();
+  const previous = recentProductPushes.get(key) || 0;
+
+  // Prune stale entries occasionally.
+  if (recentProductPushes.size > 200) {
+    for (const [k, ts] of recentProductPushes) {
+      if (now - ts > PRODUCT_PUSH_DEDUPE_MS) {
+        recentProductPushes.delete(k);
+      }
+    }
+  }
+
+  if (previous && now - previous < PRODUCT_PUSH_DEDUPE_MS) {
+    return true;
+  }
+
+  recentProductPushes.set(key, now);
+  return false;
 }
 
 function rejectUnauthorizedWebhook(res, reason) {
@@ -172,7 +223,7 @@ function getWebhookPartnerId(body) {
 
 export async function registerPushToken(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -214,13 +265,14 @@ export async function registerPushToken(req, res) {
       catch_up_sent: catchUp.sent,
     });
   } catch (err) {
-    return error(res, "Failed to register push token", 500, getOdooError(err));
+    logServerError("Failed to register push token", err);
+    return error(res, "Failed to register push token", 500);
   }
 }
 
 export async function unregisterPushToken(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -234,13 +286,14 @@ export async function unregisterPushToken(req, res) {
 
     return success(res, { message: "Push token removed" });
   } catch (err) {
-    return error(res, "Failed to remove push token", 500, getOdooError(err));
+    logServerError("Failed to remove push token", err);
+    return error(res, "Failed to remove push token", 500);
   }
 }
 
 export async function getPushStatus(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -260,13 +313,14 @@ export async function getPushStatus(req, res) {
       webhook_secret_configured: webhookSecretConfigured,
     });
   } catch (err) {
-    return error(res, "Failed to get push status", 500, getOdooError(err));
+    logServerError("Failed to get push status", err);
+    return error(res, "Failed to get push status", 500);
   }
 }
 
 export async function sendTestPush(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -299,7 +353,8 @@ export async function sendTestPush(req, res) {
       tokens: tokenEntries.map((entry) => entry.to),
     });
   } catch (err) {
-    return error(res, "Failed to send test push", 500, getOdooError(err));
+    logServerError("Failed to send test push", err);
+    return error(res, "Failed to send test push", 500);
   }
 }
 
@@ -361,6 +416,21 @@ export async function webhookNewProduct(req, res) {
 
     productName = productName || product.name;
 
+    if (shouldSkipDuplicateProductPush(productId, ribbonName)) {
+      console.warn("Product webhook ignored: duplicate within dedupe window", {
+        productId,
+        ribbon: ribbonName,
+        windowMs: PRODUCT_PUSH_DEDUPE_MS,
+      });
+      return success(res, {
+        message: "Product push skipped (duplicate within dedupe window)",
+        sent: 0,
+        reason: "duplicate_suppressed",
+        productId,
+        ribbon: ribbonName,
+      });
+    }
+
     const tokenEntries = await getAllPushTokenEntries();
 
     if (!tokenEntries.length) {
@@ -394,10 +464,10 @@ export async function webhookNewProduct(req, res) {
       failed: summary.errors.length,
       productId,
       ribbon: ribbonName,
-      tickets: result.data,
     });
   } catch (err) {
-    return error(res, "Failed to process product webhook", 500, getOdooError(err));
+    logServerError("Failed to process product webhook", err);
+    return error(res, "Failed to process product webhook", 500);
   }
 }
 
@@ -458,13 +528,14 @@ export async function webhookNewCoupon(req, res) {
       tickets: result.data,
     });
   } catch (err) {
-    return error(res, "Failed to process coupon webhook", 500, getOdooError(err));
+    logServerError("Failed to process coupon webhook", err);
+    return error(res, "Failed to process coupon webhook", 500);
   }
 }
 
 export async function getNotifications(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
 
@@ -528,6 +599,7 @@ export async function getNotifications(req, res) {
 
     return success(res, { notifications });
   } catch (err) {
-    return error(res, "Failed to get notifications", 500, getOdooError(err));
+    logServerError("Failed to get notifications", err);
+    return error(res, "Failed to get notifications", 500);
   }
 }

@@ -1,8 +1,9 @@
 import { success, error } from "../utils/response.js";
+import { logServerError } from "../utils/safe-client-error.js";
 import { getAuthUser } from "../middlewares/auth.middleware.js";
 import { odooCall } from "../services/odoo.service.js";
 import { filterCouponsForCurrentMonth } from "../utils/coupon-ticket-month.js";
-import { normalizePhone } from "../utils/phone.js";
+import { normalizePhone, phonesMatch } from "../utils/phone.js";
 
 /** Studio model for membership Apply requests (client contacts customer). */
 const MEMBERSHIP_APPLICATION_MODEL = "x_membership_applicati";
@@ -49,7 +50,7 @@ function asText(value) {
 
 export async function getMembership(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -88,13 +89,14 @@ export async function getMembership(req, res) {
       member_code: memberCode,
     });
   } catch (err) {
-    return error(res, "Failed to get membership", 500, getOdooError(err));
+    logServerError("Failed to get membership", err);
+    return error(res, "Failed to get membership", 500);
   }
 }
 
 export async function getMembershipCoupons(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -121,12 +123,23 @@ export async function getMembershipCoupons(req, res) {
       coupons: filterCouponsForCurrentMonth(coupons),
     });
   } catch (err) {
-    return error(res, "Failed to get membership coupons", 500, getOdooError(err));
+    logServerError("Failed to get membership coupons", err);
+    return error(res, "Failed to get membership coupons", 500);
   }
 }
 
 export async function checkMembership(req, res) {
   try {
+    const user = await getAuthUser(req);
+
+    if (!user) {
+      return error(res, "Unauthorized", 401);
+    }
+
+    if (!user.partner_id) {
+      return error(res, "No partner linked to this user", 400);
+    }
+
     const phone = normalizePhone(req.body.phone);
     const memberCode = String(req.body.member_code || "").trim();
 
@@ -136,8 +149,8 @@ export async function checkMembership(req, res) {
 
     const partners = await odooCall("res.partner", "search_read", {
       domain: [
+        ["id", "=", user.partner_id],
         ["x_studio_member_code", "=", memberCode],
-        ["phone", "=", phone],
       ],
       fields: [
         "id",
@@ -154,6 +167,11 @@ export async function checkMembership(req, res) {
     }
 
     const partner = partners[0];
+
+    // Only allow the logged-in member to verify their own phone + code.
+    if (!phonesMatch(partner.phone, phone)) {
+      return error(res, "Membership not found", 404);
+    }
 
     const memberships = await odooCall("x_membership", "search_read", {
       domain: [
@@ -178,7 +196,8 @@ export async function checkMembership(req, res) {
       membership: memberships[0] || null,
     });
   } catch (err) {
-    return error(res, "Failed to check membership", 500, getOdooError(err));
+    logServerError("Failed to check membership", err);
+    return error(res, "Failed to check membership", 500);
   }
 }
 
@@ -188,7 +207,7 @@ export async function checkMembership(req, res) {
  */
 export async function getMembershipApplication(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -227,7 +246,8 @@ export async function getMembershipApplication(req, res) {
         : null,
     });
   } catch (err) {
-    return error(res, "Failed to get membership application", 500, getOdooError(err));
+    logServerError("Failed to get membership application", err);
+    return error(res, "Failed to get membership application", 500);
   }
 }
 
@@ -236,7 +256,7 @@ export async function getMembershipApplication(req, res) {
  */
 export async function createMembershipApplication(req, res) {
   try {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
     if (!user) return error(res, "Unauthorized", 401);
     if (!user.partner_id) return error(res, "No partner linked to this user", 400);
@@ -313,6 +333,7 @@ export async function createMembershipApplication(req, res) {
       reused: false,
     });
   } catch (err) {
-    return error(res, "Failed to create membership application", 500, getOdooError(err));
+    logServerError("Failed to create membership application", err);
+    return error(res, "Failed to create membership application", 500);
   }
 }
