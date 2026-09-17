@@ -559,6 +559,14 @@ export async function createCheckout(req, res) {
       );
     }
 
+    const productSummary = resolvedVariants
+      .map(({ quantity, variant }) => `- ${variant.name || `Product #${variant.id}`} × ${quantity}`)
+      .join("\n");
+
+    if (productSummary) {
+      await postOrderChatter(orderId, `QR Shop delivery products:\n${productSummary}`);
+    }
+
     if (payment_method === "wire_transfer") {
       const attachmentId = await createAttachment(orderId, req.file);
 
