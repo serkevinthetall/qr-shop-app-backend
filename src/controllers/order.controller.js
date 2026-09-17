@@ -20,6 +20,7 @@ import {
   ORDER_LINE_FIELDS,
   ORDER_LIST_FIELDS,
 } from "../utils/order-delivery.js";
+import { ensureDeliveryMoveLines } from "../utils/stock-picking.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -537,6 +538,9 @@ export async function createCheckout(req, res) {
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
       });
+      await ensureDeliveryMoveLines(orderId).catch((err) => {
+        console.log("ensureDeliveryMoveLines after coupon confirm:", err?.message || err);
+      });
     } else if (order_type === "quotation_sent") {
       await odooCall("sale.order", "write", {
         ids: [orderId],
@@ -547,6 +551,9 @@ export async function createCheckout(req, res) {
     } else if (order_type === "sale_order") {
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
+      });
+      await ensureDeliveryMoveLines(orderId).catch((err) => {
+        console.log("ensureDeliveryMoveLines after sale confirm:", err?.message || err);
       });
     }
 
