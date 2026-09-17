@@ -5,6 +5,185 @@ function asId(value) {
   return Number(value) || 0;
 }
 
+/** Odoo stock.picking.state → customer-facing label (Sale → Delivery style). */
+export function mapPickingState(state) {
+  const normalized = String(state || "").trim();
+
+  switch (normalized) {
+    case "done":
+      return { state: "done", label: "Done" };
+    case "cancel":
+      return { state: "cancel", label: "Cancelled" };
+    case "assigned":
+      return { state: "assigned", label: "Ready" };
+    case "confirmed":
+    case "waiting":
+      return { state: normalized, label: "Waiting" };
+    case "draft":
+    default:
+      return { state: normalized || "draft", label: "Draft" };
+  }
+}
+
+function formatDeliveryRow(picking, index, orderName = "") {
+  const mapped = mapPickingState(picking.state);
+  return {
+    id: picking.id,
+    name: String(picking.name || `Delivery ${index + 1}`),
+    sequence: index + 1,
+    state: mapped.state,
+    state_label: mapped.label,
+    scheduled_date: picking.scheduled_date || null,
+    date_done: picking.date_done || null,
+    origin: picking.origin || orderName || null,
+  };
+}
+
+function isOutgoingPicking(picking) {
+  const code = String(picking.picking_type_code || "");
+  return !code || code === "outgoing";
+}
+
+/**
+ * Same documents as the Sale Order "Delivery" smart button in Odoo.
+ * Returns outgoing pickings linked to the SO (picking_ids / sale_id / origin).
+ */
+export async function listOrderDeliveries(orderId, orderName = "") {
+  const id = Number(orderId);
+  if (!id) return [];
+
+  let pickingIds = [];
+
+  try {
+    const orders = await odooCall("sale.order", "search_read", {
+      domain: [["id", "=", id]],
+      fields: ["id", "name", "picking_ids"],
+      limit: 1,
+    });
+    const order = orders?.[0];
+    if (order) {
+      orderName = order.name || orderName;
+      pickingIds = Array.isArray(order.picking_ids) ? order.picking_ids.filter(Boolean) : [];
+    }
+  } catch (err) {
+    console.log("listOrderDeliveries order read:", err?.message || err);
+  }
+
+  if (!pickingIds.length) {
+    const domain = orderName
+      ? ["|", ["sale_id", "=", id], ["origin", "=", orderName]]
+      : [["sale_id", "=", id]];
+
+    try {
+      const found = await odooCall("stock.picking", "search_read", {
+        domain,
+        fields: ["id"],
+        limit: 20,
+      });
+      pickingIds = (found || []).map((row) => row.id).filter(Boolean);
+    } catch (err) {
+      console.log("listOrderDeliveries picking search:", err?.message || err);
+      return [];
+    }
+  }
+
+  if (!pickingIds.length) {
+    return [];
+  }
+
+  try {
+    const pickings = await odooCall("stock.picking", "search_read", {
+      domain: [["id", "in", pickingIds]],
+      fields: [
+        "id",
+        "name",
+        "state",
+        "scheduled_date",
+        "date_done",
+        "origin",
+        "picking_type_code",
+      ],
+      order: "id asc",
+      limit: 20,
+    });
+
+    return (pickings || [])
+      .filter(isOutgoingPicking)
+      .map((picking, index) => formatDeliveryRow(picking, index, orderName));
+  } catch (err) {
+    console.log("listOrderDeliveries picking read:", err?.message || err);
+    return [];
+  }
+}
+
+/**
+ * Batch-load outgoing deliveries for an order list (Sale Delivery smart-button docs).
+ * Uses each order's picking_ids to avoid N+1 Odoo reads.
+ */
+export async function listDeliveriesForOrders(orders) {
+  const byOrderId = new Map();
+  const list = Array.isArray(orders) ? orders : [];
+
+  for (const order of list) {
+    byOrderId.set(order.id, []);
+  }
+
+  const pickingIds = [];
+  const orderIdsByPickingId = new Map();
+
+  for (const order of list) {
+    const ids = Array.isArray(order.picking_ids) ? order.picking_ids.filter(Boolean) : [];
+    for (const pickingId of ids) {
+      pickingIds.push(pickingId);
+      const linked = orderIdsByPickingId.get(pickingId) || [];
+      linked.push(order.id);
+      orderIdsByPickingId.set(pickingId, linked);
+    }
+  }
+
+  const uniqueIds = [...new Set(pickingIds)];
+  if (!uniqueIds.length) {
+    return byOrderId;
+  }
+
+  try {
+    const pickings = await odooCall("stock.picking", "search_read", {
+      domain: [["id", "in", uniqueIds]],
+      fields: [
+        "id",
+        "name",
+        "state",
+        "scheduled_date",
+        "date_done",
+        "origin",
+        "picking_type_code",
+      ],
+      order: "id asc",
+      limit: 200,
+    });
+
+    const counters = new Map();
+
+    for (const picking of pickings || []) {
+      if (!isOutgoingPicking(picking)) continue;
+
+      const orderIds = orderIdsByPickingId.get(picking.id) || [];
+      for (const orderId of orderIds) {
+        const order = list.find((row) => row.id === orderId);
+        const sequence = (counters.get(orderId) || 0) + 1;
+        counters.set(orderId, sequence);
+        const rows = byOrderId.get(orderId) || [];
+        rows.push(formatDeliveryRow(picking, sequence - 1, order?.name || ""));
+        byOrderId.set(orderId, rows);
+      }
+    }
+  } catch (err) {
+    console.log("listDeliveriesForOrders picking read:", err?.message || err);
+  }
+
+  return byOrderId;
+}
+
 /**
  * After sale.order confirm, Odoo creates stock.move on the delivery.
  * The SO "Delivery" popup shows stock.move.line ("move lines").

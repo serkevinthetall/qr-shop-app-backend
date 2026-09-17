@@ -2,18 +2,20 @@ import { isDeliveryProductName } from "./delivery-fee.js";
 
 /**
  * Customer-facing delivery status for QR Shop.
- * Additive only — does not change Odoo invoice policy.
+ * Inspired by Odoo Sale → Delivery smart button + qty_delivered.
  *
- * pending    → quotation
- * preparing  → confirmed, nothing delivered yet
- * partial    → some delivered, some still waiting
- * delivered  → all product qty delivered, not fully invoiced
- * completed  → invoice_status = invoiced
- * cancelled  → cancelled
+ * pending           → quotation
+ * preparing         → confirmed, delivery not ready yet
+ * out_for_delivery  → Odoo picking Ready (assigned) — like Delivery Out
+ * partial           → some delivered, some still waiting
+ * delivered         → all product qty delivered, not fully invoiced
+ * completed         → invoice_status = invoiced
+ * cancelled         → cancelled
  */
-export function resolveDeliveryStatus({ state, invoiceStatus, productLines }) {
+export function resolveDeliveryStatus({ state, invoiceStatus, productLines, deliveries }) {
   const normalizedState = String(state || "").trim();
   const normalizedInvoice = String(invoiceStatus || "").trim();
+  const pickingList = Array.isArray(deliveries) ? deliveries : [];
 
   if (normalizedState === "cancel") {
     return "cancelled";
@@ -38,19 +40,25 @@ export function resolveDeliveryStatus({ state, invoiceStatus, productLines }) {
     delivered += qtyDelivered;
   }
 
+  if (ordered > 0 && delivered + 1e-9 >= ordered) {
+    return "delivered";
+  }
+
+  if (delivered > 0 && delivered + 1e-9 < ordered) {
+    return "partial";
+  }
+
+  // Mirror Odoo: Ready picking = goods reserved / out for delivery.
+  const hasReadyPicking = pickingList.some((picking) => String(picking.state) === "assigned");
+  if (hasReadyPicking && delivered <= 0) {
+    return "out_for_delivery";
+  }
+
   if (ordered <= 0) {
     return normalizedState === "sale" || normalizedState === "done" ? "preparing" : "pending";
   }
 
-  if (delivered <= 0) {
-    return "preparing";
-  }
-
-  if (delivered + 1e-9 < ordered) {
-    return "partial";
-  }
-
-  return "delivered";
+  return "preparing";
 }
 
 export function isProductDeliveryLine(line) {
@@ -130,12 +138,14 @@ export function buildDeliveryBuckets(lines) {
   };
 }
 
-export function attachDeliverySummary(order, lines) {
+export function attachDeliverySummary(order, lines, deliveries = []) {
   const buckets = buildDeliveryBuckets(lines);
+  const deliveryList = Array.isArray(deliveries) ? deliveries : [];
   const deliveryStatus = resolveDeliveryStatus({
     state: order?.state,
     invoiceStatus: order?.invoice_status,
     productLines: buckets.productLines,
+    deliveries: deliveryList,
   });
 
   const productPreview = buckets.productLines.slice(0, 5).map((line) => ({
@@ -151,6 +161,8 @@ export function attachDeliverySummary(order, lines) {
     coming_later_count: buckets.coming_later_count,
     product_preview: productPreview,
     product_preview_count: buckets.productLines.length,
+    delivery_count: deliveryList.length,
+    deliveries: deliveryList,
   };
 }
 
@@ -164,6 +176,7 @@ export const ORDER_LIST_FIELDS = [
   "partner_id",
   "partner_shipping_id",
   "order_line",
+  "picking_ids",
   "x_studio_preferred_delivery_date",
   "x_studio_delivery_notes",
 ];

@@ -20,7 +20,11 @@ import {
   ORDER_LINE_FIELDS,
   ORDER_LIST_FIELDS,
 } from "../utils/order-delivery.js";
-import { ensureDeliveryMoveLines } from "../utils/stock-picking.js";
+import {
+  ensureDeliveryMoveLines,
+  listDeliveriesForOrders,
+  listOrderDeliveries,
+} from "../utils/stock-picking.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -662,6 +666,15 @@ async function loadOrderLinesByOrderIds(orderIds) {
   }
 }
 
+async function loadDeliveriesByOrders(orders) {
+  try {
+    return await listDeliveriesForOrders(orders);
+  } catch (err) {
+    console.log("Order delivery picking enrichment failed:", getOdooError(err));
+    return new Map();
+  }
+}
+
 async function readSaleOrders(domain, fields, extra = {}) {
   try {
     return await odooCall("sale.order", "search_read", {
@@ -670,12 +683,21 @@ async function readSaleOrders(domain, fields, extra = {}) {
       ...extra,
     });
   } catch (err) {
-    // Older / stripped Odoo DBs may lack invoice_status; keep orders working.
+    // Older / stripped Odoo DBs may lack invoice_status or picking_ids; keep orders working.
     const message = String(getOdooError(err) || "");
+    let nextFields = fields;
+
     if (fields.includes("invoice_status") && /invoice_status/i.test(message)) {
+      nextFields = nextFields.filter((field) => field !== "invoice_status");
+    }
+    if (fields.includes("picking_ids") && /picking_ids/i.test(message)) {
+      nextFields = nextFields.filter((field) => field !== "picking_ids");
+    }
+
+    if (nextFields.length !== fields.length) {
       return odooCall("sale.order", "search_read", {
         domain,
-        fields: fields.filter((field) => field !== "invoice_status"),
+        fields: nextFields,
         ...extra,
       });
     }
@@ -701,8 +723,13 @@ export async function getOrders(req, res) {
     );
 
     const linesByOrderId = await loadOrderLinesByOrderIds(orders.map((order) => order.id));
+    const deliveriesByOrderId = await loadDeliveriesByOrders(orders);
     const enrichedOrders = orders.map((order) =>
-      attachDeliverySummary(order, linesByOrderId.get(order.id) || [])
+      attachDeliverySummary(
+        order,
+        linesByOrderId.get(order.id) || [],
+        deliveriesByOrderId.get(order.id) || []
+      )
     );
 
     return success(res, { orders: enrichedOrders });
@@ -768,11 +795,14 @@ export async function getOrderById(req, res) {
       };
     });
 
+    const deliveries = await listOrderDeliveries(orderId, orders[0].name);
+
     return success(res, {
-      order: attachDeliverySummary(orders[0], lines),
+      order: attachDeliverySummary(orders[0], lines, deliveries),
       lines: enrichedLines,
       delivering_now: buckets.delivering_now,
       coming_later: buckets.coming_later,
+      deliveries,
     });
   } catch (err) {
     logServerError("Failed to get order", err);
