@@ -138,11 +138,19 @@ export function attachDeliverySummary(order, lines) {
     productLines: buckets.productLines,
   });
 
+  const productPreview = buckets.productLines.slice(0, 5).map((line) => ({
+    id: line.id,
+    name: line.name,
+    qty: line.qty_ordered,
+  }));
+
   return {
     ...order,
     delivery_status: deliveryStatus,
     delivering_now_count: buckets.delivering_now_count,
     coming_later_count: buckets.coming_later_count,
+    product_preview: productPreview,
+    product_preview_count: buckets.productLines.length,
   };
 }
 
