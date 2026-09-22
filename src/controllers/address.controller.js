@@ -166,7 +166,9 @@ export async function createAddress(req, res) {
     }
 
     const normalizedPhone = normalizePhone(phone);
-    const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone);
+    const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone, [
+      partnerId,
+    ]);
 
     if (duplicatePartner) {
       return error(
@@ -234,7 +236,10 @@ export async function updateAddress(req, res) {
       const normalizedPhone = req.body.phone ? normalizePhone(req.body.phone) : false;
 
       if (normalizedPhone) {
-        const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone, [addressId]);
+        const duplicatePartner = await findExistingPartnerWithPhone(normalizedPhone, [
+          addressId,
+          partnerId,
+        ]);
 
         if (duplicatePartner) {
           return error(

@@ -10,6 +10,7 @@ import {
 } from "../utils/membership-pricelist.js";
 import {
   isDeliveryFeeWaived,
+  isDeliveryProductName,
   isDeliveryVariant,
   resolveDeliveryFeeVariant,
 } from "../utils/delivery-fee.js";
@@ -20,6 +21,7 @@ import {
   ORDER_LINE_FIELDS,
   ORDER_LIST_FIELDS,
 } from "../utils/order-delivery.js";
+import { isCurrentTicketMonth } from "../utils/coupon-ticket-month.js";
 import {
   ensureDeliveryMoveLines,
   listDeliveriesForOrders,
@@ -274,10 +276,43 @@ async function postOrderChatter(orderId, body, attachmentIds = []) {
   });
 }
 
-// Mirrors Odoo's "Enter Promotion or Coupon Code" flow: type the code, then
-// claim the matching reward so the discount line lands on the order. Odoo's own
-// loyalty/discount program does the actual price reduction. Throws when Odoo
-// rejects the code (invalid, expired, already used, below program minimum).
+async function orderHasCouponDiscount(orderId) {
+  const rewardLines = await odooCall("sale.order.line", "search_read", {
+    domain: [
+      ["order_id", "=", orderId],
+      ["is_reward_line", "=", true],
+    ],
+    fields: ["id"],
+    limit: 1,
+  });
+
+  if (Array.isArray(rewardLines) && rewardLines.length > 0) {
+    return true;
+  }
+
+  // Membership-ticket fallback uses a normal negative discount line (not always
+  // flagged as is_reward_line).
+  const discountLines = await odooCall("sale.order.line", "search_read", {
+    domain: [
+      ["order_id", "=", orderId],
+      ["price_unit", "<", 0],
+    ],
+    fields: ["id"],
+    limit: 1,
+  });
+
+  return Array.isArray(discountLines) && discountLines.length > 0;
+}
+
+function rewardIdsFromAction(action) {
+  const ctx = action && typeof action === "object" ? action.context || {} : {};
+  const raw = ctx.default_reward_ids || ctx.reward_ids || [];
+  return Array.isArray(raw) ? raw.filter((id) => Number(id) > 0) : [];
+}
+
+// Mirrors Odoo's "Enter Promotion or Coupon Code" flow. When only one reward is
+// claimable, Odoo auto-applies it and returns True — do not open the reward
+// wizard in that case (that was returning "No reward" and rolling back the order).
 async function applyCouponToOrder(orderId, code) {
   const couponWizardId = getCreatedId(
     await odooCall("sale.loyalty.coupon.wizard", "create", {
@@ -289,14 +324,47 @@ async function applyCouponToOrder(orderId, code) {
     args: [[couponWizardId]],
   });
 
-  const rewardWizardId = getCreatedId(
-    await odooCall("sale.loyalty.reward.wizard", "create", {
-      vals_list: [{ order_id: orderId }],
-    })
-  );
+  if (await orderHasCouponDiscount(orderId)) {
+    return;
+  }
 
-  let rewardIds =
-    (action && action.context && action.context.default_reward_ids) || [];
+  // Single-reward path: Odoo may return True after auto-apply. Only accept that
+  // when a discount line actually landed — otherwise we would confirm to Sale
+  // Order and burn the membership ticket with no discount.
+  if (action === true) {
+    if (await orderHasCouponDiscount(orderId)) {
+      return;
+    }
+    throw new Error("Coupon applied in Odoo but no discount line was created.");
+  }
+
+  const opensRewardWizard =
+    action &&
+    typeof action === "object" &&
+    (action.res_model === "sale.loyalty.reward.wizard" ||
+      (action.type === "ir.actions.act_window" && action.context));
+
+  if (!opensRewardWizard) {
+    if (await orderHasCouponDiscount(orderId)) {
+      return;
+    }
+    throw new Error("No reward is available for this coupon.");
+  }
+
+  let rewardIds = rewardIdsFromAction(action);
+  const rewardWizardVals = { order_id: orderId };
+
+  if (rewardIds.length) {
+    rewardWizardVals.reward_ids = [[6, 0, rewardIds]];
+  }
+
+  const rewardWizardId =
+    parseScalarId(action.res_id) ||
+    getCreatedId(
+      await odooCall("sale.loyalty.reward.wizard", "create", {
+        vals_list: [rewardWizardVals],
+      })
+    );
 
   if (!rewardIds.length) {
     const wizards = await odooCall("sale.loyalty.reward.wizard", "read", {
@@ -306,6 +374,9 @@ async function applyCouponToOrder(orderId, code) {
   }
 
   if (!rewardIds.length) {
+    if (await orderHasCouponDiscount(orderId)) {
+      return;
+    }
     throw new Error("No reward is available for this coupon.");
   }
 
@@ -316,6 +387,71 @@ async function applyCouponToOrder(orderId, code) {
 
   await odooCall("sale.loyalty.reward.wizard", "action_apply", {
     args: [[rewardWizardId]],
+  });
+
+  if (!(await orderHasCouponDiscount(orderId))) {
+    throw new Error("Coupon reward applied but no discount line was created.");
+  }
+}
+
+// Fallback when loyalty has no matching code: put the Studio ticket amount on
+// the order as a discount line, then mark the membership ticket used.
+async function applyMembershipTicketDiscount(orderId, ticket) {
+  const amount = Math.abs(Number(ticket.x_studio_coupon_amount) || 0);
+
+  if (amount <= 0) {
+    throw new Error("Coupon amount is zero");
+  }
+
+  let productId = parseScalarId(process.env.COUPON_DISCOUNT_PRODUCT_ID);
+
+  if (!productId) {
+    const products = await odooCall("product.product", "search_read", {
+      domain: [
+        "|",
+        ["default_code", "=", "DISC"],
+        ["name", "ilike", "Discount"],
+      ],
+      fields: ["id", "name"],
+      limit: 1,
+    });
+    productId = products[0]?.id || null;
+  }
+
+  if (!productId) {
+    throw new Error("No discount product configured for membership coupons");
+  }
+
+  await odooCall("sale.order", "write", {
+    ids: [orderId],
+    vals: {
+      order_line: [
+        [
+          0,
+          0,
+          {
+            product_id: productId,
+            name: `Membership coupon ${ticket.x_studio_coupon_code || ""}`.trim(),
+            product_uom_qty: 1,
+            price_unit: -amount,
+          },
+        ],
+      ],
+    },
+  });
+
+  if (!(await orderHasCouponDiscount(orderId))) {
+    throw new Error("Membership ticket discount line was not created.");
+  }
+}
+
+async function markMembershipTicketUsed(ticketId, orderId) {
+  await odooCall("x_membership_coupon_ti", "write", {
+    ids: [ticketId],
+    vals: {
+      x_studio_status: "Used",
+      x_studio_used_sale_order: orderId,
+    },
   });
 }
 
@@ -335,8 +471,10 @@ export async function createCheckout(req, res) {
       note = "",
       preferred_delivery_date = null,
       delivery_notes = "",
-      coupon_code = "",
+      coupon_code: rawCouponCode = "",
     } = req.body;
+
+    const coupon_code = String(rawCouponCode || "").trim();
 
     const address_id = req.body.address_id ?? req.body.addressId;
 
@@ -437,6 +575,8 @@ export async function createCheckout(req, res) {
 
     // Coupon validation: order total must be at least the coupon amount, and the
     // coupon must still be available for this customer.
+    let membershipTicket = null;
+
     if (coupon_code) {
       const coupons = await odooCall("x_membership_coupon_ti", "search_read", {
         domain: [
@@ -445,24 +585,33 @@ export async function createCheckout(req, res) {
         ],
         fields: [
           "id",
+          "x_studio_coupon_code",
           "x_studio_coupon_amount",
           "x_studio_status",
           "x_studio_used_sale_order",
+          "x_studio_ticket_month",
         ],
         limit: 1,
       });
 
-      const coupon = coupons[0];
+      membershipTicket = coupons[0] || null;
 
-      if (!coupon) {
+      if (!membershipTicket) {
         return error(res, "Coupon not found for this account", 400);
       }
 
-      if (coupon.x_studio_status !== "Currently Available" || coupon.x_studio_used_sale_order) {
+      if (
+        membershipTicket.x_studio_status !== "Currently Available" ||
+        membershipTicket.x_studio_used_sale_order
+      ) {
         return error(res, "This coupon is no longer available", 400);
       }
 
-      const couponAmount = Number(coupon.x_studio_coupon_amount) || 0;
+      if (!isCurrentTicketMonth(membershipTicket.x_studio_ticket_month)) {
+        return error(res, "This coupon is not valid for the current month", 400);
+      }
+
+      const couponAmount = Number(membershipTicket.x_studio_coupon_amount) || 0;
 
       if (couponAmount > 0 && cartSubtotal < couponAmount) {
         return error(
@@ -524,27 +673,57 @@ export async function createCheckout(req, res) {
 
     await applyOrderShippingAddress(orderId, shippingPartnerId);
 
-    // Apply the coupon while the order is still a draft. Odoo's loyalty program
-    // adds the discount line and marks the coupon used.
+    // Apply the coupon while the order is still a draft. Prefer Odoo loyalty;
+    // if that fails (e.g. Studio ticket with no loyalty.card), fall back to a
+    // fixed discount line from the membership ticket amount.
+    // With a coupon we confirm to Sale Order + mark ticket Used so it cannot
+    // be used again — but only after a real discount line exists.
     if (coupon_code) {
       try {
         await applyCouponToOrder(orderId, coupon_code);
-      } catch (couponErr) {
+      } catch (loyaltyErr) {
+        logServerError("Loyalty coupon apply failed; trying ticket discount", loyaltyErr);
+
+        try {
+          if (!membershipTicket) {
+            throw loyaltyErr;
+          }
+          await applyMembershipTicketDiscount(orderId, membershipTicket);
+        } catch (couponErr) {
+          await odooCall("sale.order", "unlink", { args: [[orderId]] }).catch(() => {});
+          logServerError("Coupon could not be applied", couponErr);
+          return error(res, "Coupon could not be applied", 400, { code: "COUPON_APPLY_FAILED" });
+        }
+      }
+
+      if (!(await orderHasCouponDiscount(orderId))) {
         await odooCall("sale.order", "unlink", { args: [[orderId]] }).catch(() => {});
-        logServerError("Coupon could not be applied", couponErr);
         return error(res, "Coupon could not be applied", 400, { code: "COUPON_APPLY_FAILED" });
       }
-    }
 
-    if (coupon_code) {
-      // Coupon checkout confirms to Sale Order so Odoo can mark the membership
-      // coupon ticket Used. No-coupon checkout stays Quotation Sent.
+      // Confirm → Sale Order so Odoo + ticket status lock one-time use.
       await odooCall("sale.order", "action_confirm", {
         ids: [orderId],
       });
       await ensureDeliveryMoveLines(orderId).catch((err) => {
         console.log("ensureDeliveryMoveLines after coupon confirm:", err?.message || err);
       });
+
+      if (membershipTicket?.id) {
+        try {
+          await markMembershipTicketUsed(membershipTicket.id, orderId);
+        } catch (err) {
+          logServerError("Failed to mark membership coupon ticket used", err);
+          // Order is already confirmed with discount; surface so ops can fix
+          // the ticket manually rather than silently allowing reuse.
+          return error(
+            res,
+            "Order created with coupon, but ticket could not be marked used",
+            500,
+            { code: "COUPON_TICKET_MARK_FAILED", order_id: orderId }
+          );
+        }
+      }
     } else if (order_type === "quotation_sent") {
       await odooCall("sale.order", "write", {
         ids: [orderId],
@@ -841,13 +1020,20 @@ export async function reorder(req, res) {
 
     const oldLines = await odooCall("sale.order.line", "search_read", {
       domain: [["order_id", "=", oldOrderId]],
-      fields: ["product_id", "product_uom_qty", "is_reward_line"],
+      fields: ["product_id", "product_uom_qty", "is_reward_line", "price_unit", "name"],
     });
 
     if (!oldLines.length) return error(res, "Previous order has no products", 400);
 
     const newLines = oldLines
-      .filter((line) => line.product_id && line.product_id[0] && !line.is_reward_line)
+      .filter((line) => {
+        if (!line.product_id || !line.product_id[0]) return false;
+        if (line.is_reward_line) return false;
+        if (Number(line.price_unit) < 0) return false;
+        const label = Array.isArray(line.product_id) ? line.product_id[1] : line.name;
+        if (isDeliveryProductName(label)) return false;
+        return true;
+      })
       .map((line) => [
         0,
         0,
@@ -856,6 +1042,10 @@ export async function reorder(req, res) {
           product_uom_qty: line.product_uom_qty,
         },
       ]);
+
+    if (!newLines.length) {
+      return error(res, "Previous order has no products to reorder", 400);
+    }
 
     const createdIds = await odooCall("sale.order", "create", {
       vals_list: [

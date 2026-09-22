@@ -24,6 +24,26 @@ import {
   getMembershipProductPriceSnapshot,
 } from "../utils/membership-pricelist.js";
 
+const FALLBACK_PRODUCT_ORDER = "name asc";
+
+async function searchProductTemplates(params) {
+  try {
+    return await odooCall("product.template", "search_read", params);
+  } catch (err) {
+    const message = String(err?.message || err || "");
+    if (
+      params.order === APP_PRODUCT_ORDER &&
+      /is_favorite/i.test(message)
+    ) {
+      return odooCall("product.template", "search_read", {
+        ...params,
+        order: FALLBACK_PRODUCT_ORDER,
+      });
+    }
+    throw err;
+  }
+}
+
 let categoriesCache = null;
 let categoriesCacheTime = 0;
 const CATEGORIES_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -218,7 +238,7 @@ export async function getProducts(req, res) {
 
     domain = justForYou.domain;
 
-    const products = await odooCall("product.template", "search_read", {
+    const products = await searchProductTemplates({
       domain,
       fields: APP_PRODUCT_LIST_FIELDS,
       limit,
@@ -269,7 +289,7 @@ export async function getProductById(req, res) {
       similarLimit > 0 && product.categ_id && product.categ_id[0];
 
     const similarPromise = shouldLoadSimilar
-      ? odooCall("product.template", "search_read", {
+      ? searchProductTemplates({
           domain: getAppProductDomain([
             ["categ_id", "=", product.categ_id[0]],
             ["id", "!=", product.id],
@@ -345,7 +365,7 @@ export async function searchProducts(req, res) {
 
     domain = justForYou.domain;
 
-    const products = await odooCall("product.template", "search_read", {
+    const products = await searchProductTemplates({
       domain,
       fields: APP_PRODUCT_LIST_FIELDS,
       limit: 30,
