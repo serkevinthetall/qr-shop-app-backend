@@ -864,6 +864,18 @@ export async function createCheckout(req, res) {
       )
     );
 
+    let order = orders[0] || null;
+
+    // Studio Fulfillment fields may not exist yet — still return pickup info
+    // from the point we already resolved for this checkout.
+    if (order && isPickup && pickupPoint) {
+      order = {
+        ...order,
+        fulfillment_method: "pickup",
+        pickup_point: order.pickup_point || pickupPoint,
+      };
+    }
+
     return success(res, {
       message: coupon_code
         ? "Order confirmed with coupon applied"
@@ -872,7 +884,7 @@ export async function createCheckout(req, res) {
         : order_type === "quotation_sent"
         ? "Quotation sent created"
         : "Quotation created",
-      order: orders[0] || null,
+      order,
     });
   } catch (err) {
     console.log("Checkout Odoo Error:", getOdooError(err));
@@ -987,11 +999,9 @@ async function readSaleOrders(domain, fields, extra = {}) {
     }
 
     if (nextFields.length !== fields.length) {
-      return odooCall("sale.order", "search_read", {
-        domain,
-        fields: nextFields,
-        ...extra,
-      });
+      // Recurse so multiple missing optional fields (e.g. both pickup Studio
+      // fields) can be stripped one-by-one without failing checkout.
+      return readSaleOrders(domain, nextFields, extra);
     }
     throw err;
   }
