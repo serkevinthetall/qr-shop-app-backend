@@ -529,24 +529,27 @@ export async function createCheckout(req, res) {
         return error(res, "Pickup point is required", 400);
       }
 
-      // Pickup: no delivery address required. Keep partner as shipping contact.
-      shippingPartnerId = partnerId;
       pickupNoteText = buildPickupNote(pickupPoint);
-    } else {
-      shippingPartnerId = await resolveShippingPartnerId(
-        { partner_id: partnerId },
-        address_id,
-      );
+    }
 
-      if (!shippingPartnerId) {
-        return error(
-          res,
-          parseScalarId(address_id)
-            ? "Selected delivery address is invalid"
+    // Odoo sale orders need a Contact delivery location (partner_shipping_id).
+    // Self Pickup still requires a customer contact address — separate from
+    // the Pickup Point (where they collect). Old apps only send address_id.
+    shippingPartnerId = await resolveShippingPartnerId(
+      { partner_id: partnerId },
+      address_id,
+    );
+
+    if (!shippingPartnerId) {
+      return error(
+        res,
+        parseScalarId(address_id)
+          ? "Selected delivery address is invalid"
+          : isPickup
+            ? "Contact address is required for pickup orders"
             : "Delivery address is required",
-          400
-        );
-      }
+        400
+      );
     }
 
     const orderLines = [];
@@ -751,10 +754,6 @@ export async function createCheckout(req, res) {
 
     const orderId = getCreatedId(createdIds);
 
-    if (!isPickup) {
-      await applyOrderShippingAddress(orderId, shippingPartnerId);
-    }
-
     // Apply the coupon while the order is still a draft. Prefer Odoo loyalty;
     // if that fails (e.g. Studio ticket with no loyalty.card), fall back to a
     // fixed discount line from the membership ticket amount.
@@ -822,17 +821,19 @@ export async function createCheckout(req, res) {
       });
     }
 
+    const shippingPartner = await applyOrderShippingAddress(orderId, shippingPartnerId);
+
     if (isPickup && pickupNoteText) {
       await postOrderChatter(orderId, pickupNoteText);
-    } else {
-      const shippingPartner = await applyOrderShippingAddress(orderId, shippingPartnerId);
+    }
 
-      if (shippingPartner) {
-        await postOrderChatter(
-          orderId,
-          `QR Shop delivery branch selected:\n${formatPartnerAddress(shippingPartner)}`
-        );
-      }
+    if (shippingPartner) {
+      await postOrderChatter(
+        orderId,
+        isPickup
+          ? `QR Shop contact address (pickup order):\n${formatPartnerAddress(shippingPartner)}`
+          : `QR Shop delivery branch selected:\n${formatPartnerAddress(shippingPartner)}`
+      );
     }
 
     const productSummary = resolvedVariants
