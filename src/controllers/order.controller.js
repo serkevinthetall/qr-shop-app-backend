@@ -27,6 +27,16 @@ import {
   listDeliveriesForOrders,
   listOrderDeliveries,
 } from "../utils/stock-picking.js";
+import {
+  buildPickupNote,
+  getActivePickupPointById,
+  normalizeFulfillmentMethod,
+  parseFulfillmentFromOrder,
+  parsePickupPointIdFromOrder,
+  readPickupPointsByIds,
+  SO_FULFILLMENT_FIELD,
+  SO_PICKUP_POINT_FIELD,
+} from "../utils/pickup-point.js";
 
 async function getProductVariant(productTemplateId) {
   const templates = await odooCall("product.template", "search_read", {
@@ -477,6 +487,21 @@ export async function createCheckout(req, res) {
     const coupon_code = String(rawCouponCode || "").trim();
 
     const address_id = req.body.address_id ?? req.body.addressId;
+    const rawFulfillment =
+      req.body.fulfillment_method ??
+      req.body.fulfillmentMethod ??
+      req.body.fulfillment ??
+      "";
+    // Old production apps omit fulfillment → always delivery (unchanged).
+    const fulfillmentMethod =
+      normalizeFulfillmentMethod(rawFulfillment) || "delivery";
+
+    if (normalizeFulfillmentMethod(rawFulfillment) === null && String(rawFulfillment).trim()) {
+      return error(res, "Invalid fulfillment_method. Use delivery or pickup", 400);
+    }
+
+    const pickup_point_id =
+      req.body.pickup_point_id ?? req.body.pickupPointId ?? null;
 
     const items = parseItems(req.body.items);
 
@@ -492,19 +517,36 @@ export async function createCheckout(req, res) {
       return error(res, "Payment screenshot is required for wire transfer", 400);
     }
 
-    const shippingPartnerId = await resolveShippingPartnerId(
-      { partner_id: partnerId },
-      address_id,
-    );
+    const isPickup = fulfillmentMethod === "pickup";
+    let pickupPoint = null;
+    let shippingPartnerId = null;
+    let pickupNoteText = "";
 
-    if (!shippingPartnerId) {
-      return error(
-        res,
-        parseScalarId(address_id)
-          ? "Selected delivery address is invalid"
-          : "Delivery address is required",
-        400
+    if (isPickup) {
+      pickupPoint = await getActivePickupPointById(pickup_point_id);
+
+      if (!pickupPoint) {
+        return error(res, "Pickup point is required", 400);
+      }
+
+      // Pickup: no delivery address required. Keep partner as shipping contact.
+      shippingPartnerId = partnerId;
+      pickupNoteText = buildPickupNote(pickupPoint);
+    } else {
+      shippingPartnerId = await resolveShippingPartnerId(
+        { partner_id: partnerId },
+        address_id,
       );
+
+      if (!shippingPartnerId) {
+        return error(
+          res,
+          parseScalarId(address_id)
+            ? "Selected delivery address is invalid"
+            : "Delivery address is required",
+          400
+        );
+      }
     }
 
     const orderLines = [];
@@ -624,9 +666,10 @@ export async function createCheckout(req, res) {
 
     // Auto delivery fee from selected branch postal → x_delivery_fee.
     // Waived for Active Pro/Premium or partner tag Shop (case-insensitive).
+    // Self Pickup always skips the fee (additive; old apps never send pickup).
     // Cart Delivery lines are stripped above so branch changes never keep a stale fee.
     // Coupon minimum still uses cart-only subtotal (above).
-    if (!deliveryFeeWaived) {
+    if (!isPickup && !deliveryFeeWaived) {
       const shippingForFee = await readShippingPartner(shippingPartnerId);
       const deliveryFee = await resolveDeliveryFeeVariant(shippingForFee?.zip);
 
@@ -643,16 +686,27 @@ export async function createCheckout(req, res) {
       }
     }
 
+    const customerDeliveryNotes = String(delivery_notes || "").trim();
+    const combinedDeliveryNotes = isPickup
+      ? [pickupNoteText, customerDeliveryNotes].filter(Boolean).join("\n\n")
+      : customerDeliveryNotes;
+
     const orderVals = {
       partner_id: partnerId,
       partner_invoice_id: partnerId,
       partner_shipping_id: shippingPartnerId,
 
       x_studio_preferred_delivery_date: preferred_delivery_date || false,
-      x_studio_delivery_notes: delivery_notes || false,
+      x_studio_delivery_notes: combinedDeliveryNotes || false,
 
       order_line: orderLines,
     };
+
+    if (isPickup && pickupPoint) {
+      // Optional Studio fields — must exist on SO for structured pickup.
+      orderVals[SO_FULFILLMENT_FIELD] = "pickup";
+      orderVals[SO_PICKUP_POINT_FIELD] = pickupPoint.id;
+    }
 
     if (pricelistId) {
       orderVals.pricelist_id = pricelistId;
@@ -665,13 +719,41 @@ export async function createCheckout(req, res) {
       orderVals.note = note;
     }
 
-    const createdIds = await odooCall("sale.order", "create", {
-      vals_list: [orderVals],
-    });
+    let createdIds;
+    try {
+      createdIds = await odooCall("sale.order", "create", {
+        vals_list: [orderVals],
+      });
+    } catch (createErr) {
+      // If Studio Fulfillment / Pickup Point fields are not on sale.order yet,
+      // still create the order with bilingual notes so checkout is not blocked.
+      const createMessage = String(getOdooError(createErr) || "");
+      const missingPickupStudio =
+        isPickup &&
+        (/x_studio_fulfillment/i.test(createMessage) ||
+          /x_studio_pickup_point/i.test(createMessage) ||
+          /Invalid field/i.test(createMessage));
+
+      if (!missingPickupStudio) {
+        throw createErr;
+      }
+
+      logServerError(
+        "Pickup Studio fields missing on sale.order; creating with notes only",
+        createErr
+      );
+      delete orderVals[SO_FULFILLMENT_FIELD];
+      delete orderVals[SO_PICKUP_POINT_FIELD];
+      createdIds = await odooCall("sale.order", "create", {
+        vals_list: [orderVals],
+      });
+    }
 
     const orderId = getCreatedId(createdIds);
 
-    await applyOrderShippingAddress(orderId, shippingPartnerId);
+    if (!isPickup) {
+      await applyOrderShippingAddress(orderId, shippingPartnerId);
+    }
 
     // Apply the coupon while the order is still a draft. Prefer Odoo loyalty;
     // if that fails (e.g. Studio ticket with no loyalty.card), fall back to a
@@ -740,13 +822,17 @@ export async function createCheckout(req, res) {
       });
     }
 
-    const shippingPartner = await applyOrderShippingAddress(orderId, shippingPartnerId);
+    if (isPickup && pickupNoteText) {
+      await postOrderChatter(orderId, pickupNoteText);
+    } else {
+      const shippingPartner = await applyOrderShippingAddress(orderId, shippingPartnerId);
 
-    if (shippingPartner) {
-      await postOrderChatter(
-        orderId,
-        `QR Shop delivery branch selected:\n${formatPartnerAddress(shippingPartner)}`
-      );
+      if (shippingPartner) {
+        await postOrderChatter(
+          orderId,
+          `QR Shop delivery branch selected:\n${formatPartnerAddress(shippingPartner)}`
+        );
+      }
     }
 
     const productSummary = resolvedVariants
@@ -754,7 +840,12 @@ export async function createCheckout(req, res) {
       .join("\n");
 
     if (productSummary) {
-      await postOrderChatter(orderId, `QR Shop delivery products:\n${productSummary}`);
+      await postOrderChatter(
+        orderId,
+        isPickup
+          ? `QR Shop pickup products:\n${productSummary}`
+          : `QR Shop delivery products:\n${productSummary}`
+      );
     }
 
     if (payment_method === "wire_transfer") {
@@ -774,23 +865,12 @@ export async function createCheckout(req, res) {
       );
     }
 
-    const orders = await attachShippingAddresses(
-      await odooCall("sale.order", "search_read", {
-        domain: [["id", "=", orderId]],
-        fields: [
-          "id",
-          "name",
-          "state",
-          "amount_total",
-          "partner_id",
-          "partner_shipping_id",
-          "date_order",
-          "note",
-          "x_studio_preferred_delivery_date",
-          "x_studio_delivery_notes",
-        ],
-        limit: 1,
-      })
+    const orders = await attachPickupInfo(
+      await attachShippingAddresses(
+        await readSaleOrders([["id", "=", orderId]], ORDER_DETAIL_FIELDS, {
+          limit: 1,
+        })
+      )
     );
 
     return success(res, {
@@ -808,6 +888,35 @@ export async function createCheckout(req, res) {
     logServerError("Checkout failed", err);
     return error(res, "Checkout failed", 500);
   }
+}
+
+async function attachPickupInfo(orders) {
+  const list = Array.isArray(orders) ? orders : [];
+
+  if (!list.length) {
+    return list;
+  }
+
+  const pickupIds = list
+    .map((order) => parsePickupPointIdFromOrder(order))
+    .filter(Boolean);
+
+  const pointsById = await readPickupPointsByIds(pickupIds);
+
+  return list.map((order) => {
+    const fulfillment = parseFulfillmentFromOrder(order);
+    const pickupId = parsePickupPointIdFromOrder(order);
+    const pickup_point =
+      fulfillment === "pickup" && pickupId
+        ? pointsById.get(pickupId) || null
+        : null;
+
+    return {
+      ...order,
+      fulfillment_method: fulfillment,
+      pickup_point,
+    };
+  });
 }
 
 async function loadOrderLinesByOrderIds(orderIds) {
@@ -872,6 +981,19 @@ async function readSaleOrders(domain, fields, extra = {}) {
     if (fields.includes("picking_ids") && /picking_ids/i.test(message)) {
       nextFields = nextFields.filter((field) => field !== "picking_ids");
     }
+    // Self Pickup Studio fields may not exist yet on older DBs.
+    if (
+      fields.includes("x_studio_fulfillment") &&
+      /x_studio_fulfillment/i.test(message)
+    ) {
+      nextFields = nextFields.filter((field) => field !== "x_studio_fulfillment");
+    }
+    if (
+      fields.includes("x_studio_pickup_point") &&
+      /x_studio_pickup_point/i.test(message)
+    ) {
+      nextFields = nextFields.filter((field) => field !== "x_studio_pickup_point");
+    }
 
     if (nextFields.length !== fields.length) {
       return odooCall("sale.order", "search_read", {
@@ -894,11 +1016,13 @@ export async function getOrders(req, res) {
 
     if (!partnerId) return error(res, "No partner linked to this user", 400);
 
-    const orders = await attachShippingAddresses(
-      await readSaleOrders([["partner_id", "=", partnerId]], ORDER_LIST_FIELDS, {
-        order: "date_order desc",
-        limit: 50,
-      })
+    const orders = await attachPickupInfo(
+      await attachShippingAddresses(
+        await readSaleOrders([["partner_id", "=", partnerId]], ORDER_LIST_FIELDS, {
+          order: "date_order desc",
+          limit: 50,
+        })
+      )
     );
 
     const linesByOrderId = await loadOrderLinesByOrderIds(orders.map((order) => order.id));
@@ -930,14 +1054,16 @@ export async function getOrderById(req, res) {
 
     if (!partnerId) return error(res, "No partner linked to this user", 400);
 
-    const orders = await attachShippingAddresses(
-      await readSaleOrders(
-        [
-          ["id", "=", orderId],
-          ["partner_id", "=", partnerId],
-        ],
-        ORDER_DETAIL_FIELDS,
-        { limit: 1 }
+    const orders = await attachPickupInfo(
+      await attachShippingAddresses(
+        await readSaleOrders(
+          [
+            ["id", "=", orderId],
+            ["partner_id", "=", partnerId],
+          ],
+          ORDER_DETAIL_FIELDS,
+          { limit: 1 }
+        )
       )
     );
 
