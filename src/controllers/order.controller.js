@@ -533,21 +533,23 @@ export async function createCheckout(req, res) {
     }
 
     // Odoo sale orders need a Contact delivery location (partner_shipping_id).
-    // Self Pickup still requires a customer contact address — separate from
-    // the Pickup Point (where they collect). Old apps only send address_id.
+    // Self Pickup: prefer address_id from the app (main contact sent in background);
+    // if missing/invalid, fall back to the customer's main partner so pickup still works.
     shippingPartnerId = await resolveShippingPartnerId(
       { partner_id: partnerId },
       address_id,
     );
+
+    if (!shippingPartnerId && isPickup) {
+      shippingPartnerId = partnerId;
+    }
 
     if (!shippingPartnerId) {
       return error(
         res,
         parseScalarId(address_id)
           ? "Selected delivery address is invalid"
-          : isPickup
-            ? "Contact address is required for pickup orders"
-            : "Delivery address is required",
+          : "Delivery address is required",
         400
       );
     }
@@ -705,12 +707,6 @@ export async function createCheckout(req, res) {
       order_line: orderLines,
     };
 
-    if (isPickup && pickupPoint) {
-      // Optional Studio fields — must exist on SO for structured pickup.
-      orderVals[SO_FULFILLMENT_FIELD] = "pickup";
-      orderVals[SO_PICKUP_POINT_FIELD] = pickupPoint.id;
-    }
-
     if (pricelistId) {
       orderVals.pricelist_id = pricelistId;
     }
@@ -722,37 +718,31 @@ export async function createCheckout(req, res) {
       orderVals.note = note;
     }
 
-    let createdIds;
-    try {
-      createdIds = await odooCall("sale.order", "create", {
-        vals_list: [orderVals],
-      });
-    } catch (createErr) {
-      // If Studio Fulfillment / Pickup Point fields are not on sale.order yet,
-      // still create the order with bilingual notes so checkout is not blocked.
-      const createMessage = String(getOdooError(createErr) || "");
-      const missingPickupStudio =
-        isPickup &&
-        (/x_studio_fulfillment/i.test(createMessage) ||
-          /x_studio_pickup_point/i.test(createMessage) ||
-          /Invalid field/i.test(createMessage));
-
-      if (!missingPickupStudio) {
-        throw createErr;
-      }
-
-      logServerError(
-        "Pickup Studio fields missing on sale.order; creating with notes only",
-        createErr
-      );
-      delete orderVals[SO_FULFILLMENT_FIELD];
-      delete orderVals[SO_PICKUP_POINT_FIELD];
-      createdIds = await odooCall("sale.order", "create", {
-        vals_list: [orderVals],
-      });
-    }
+    // Create without Studio pickup fields first so a missing/misconfigured
+    // Fulfillment or Pickup Point field cannot block checkout. Notes already
+    // carry the bilingual pickup text for warehouse staff.
+    const createdIds = await odooCall("sale.order", "create", {
+      vals_list: [orderVals],
+    });
 
     const orderId = getCreatedId(createdIds);
+
+    if (isPickup && pickupPoint) {
+      try {
+        await odooCall("sale.order", "write", {
+          ids: [orderId],
+          vals: {
+            [SO_FULFILLMENT_FIELD]: "pickup",
+            [SO_PICKUP_POINT_FIELD]: pickupPoint.id,
+          },
+        });
+      } catch (studioErr) {
+        logServerError(
+          "Pickup Studio fields could not be written; order kept with pickup notes",
+          studioErr
+        );
+      }
+    }
 
     // Apply the coupon while the order is still a draft. Prefer Odoo loyalty;
     // if that fails (e.g. Studio ticket with no loyalty.card), fall back to a
