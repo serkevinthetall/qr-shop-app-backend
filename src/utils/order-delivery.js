@@ -179,9 +179,9 @@ export const ORDER_LIST_FIELDS = [
   "picking_ids",
   "x_studio_preferred_delivery_date",
   "x_studio_delivery_notes",
-  // Optional Studio fields for Self Pickup (stripped in readSaleOrders if missing).
-  "x_studio_fulfillment",
-  "x_studio_pickup_point",
+  // Do NOT read x_studio_fulfillment / x_studio_pickup_point until they exist
+  // on sale.order in Odoo. Asking for missing fields broke checkout/order list
+  // for old production apps (delivery-only) as well as pickup.
 ];
 
 export const ORDER_DETAIL_FIELDS = [
